@@ -1,0 +1,3011 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+    <title>Puterra - Cloud OS with AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+        
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        
+        .desktop-bg {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: 
+                radial-gradient(ellipse at top left, rgba(99, 102, 241, 0.15) 0%, transparent 50%),
+                radial-gradient(ellipse at bottom right, rgba(168, 85, 247, 0.15) 0%, transparent 50%),
+                linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+            z-index: -1;
+        }
+        
+        .glass {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .login-card {
+            background: rgba(255, 255, 255, 0.08);
+            backdrop-filter: blur(40px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            transition: all 0.2s ease;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 40px rgba(99, 102, 241, 0.4);
+        }
+        
+        .input-field {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: all 0.2s ease;
+        }
+        
+        .input-field:focus {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(99, 102, 241, 0.5);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+        }
+        
+        .desktop-icon {
+            width: 80px;
+            padding: 12px;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: background 0.15s ease, transform 0.15s ease;
+            text-align: center;
+            user-select: none;
+        }
+        
+        .desktop-icon:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        .desktop-icon.selected {
+            background: rgba(99, 102, 241, 0.3);
+            border: 1px solid rgba(99, 102, 241, 0.5);
+        }
+        
+        .desktop-icon i {
+            font-size: 2.5rem;
+            margin-bottom: 8px;
+            display: block;
+        }
+        
+        .desktop-icon span {
+            font-size: 0.7rem;
+            display: block;
+            word-break: break-word;
+            line-height: 1.2;
+        }
+        
+        .window {
+            position: absolute;
+            background: rgba(30, 30, 40, 0.98);
+            backdrop-filter: blur(20px);
+            border-radius: 12px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            min-width: 300px;
+            min-height: 200px;
+            display: flex;
+            flex-direction: column;
+            resize: both;
+            overflow: hidden;
+        }
+        
+        .window-resize-handle {
+            position: absolute;
+            bottom: 0;
+            right: 0;
+            width: 16px;
+            height: 16px;
+            cursor: se-resize;
+            background: linear-gradient(135deg, transparent 50%, rgba(255,255,255,0.2) 50%);
+            border-radius: 0 0 12px 0;
+        }
+        
+        .window.minimized { display: none; }
+        
+        .window-header {
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.2) 0%, rgba(139, 92, 246, 0.2) 100%);
+            padding: 12px 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            cursor: move;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 12px 12px 0 0;
+        }
+        
+        .window-title {
+            font-weight: 600;
+            font-size: 0.875rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .window-controls { display: flex; gap: 8px; }
+        
+        .window-btn {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: transform 0.2s;
+            border: none;
+        }
+        
+        .window-btn:hover { transform: scale(1.2); }
+        .window-btn.close { background: #ef4444; }
+        .window-btn.minimize { background: #f59e0b; }
+        .window-btn.maximize { background: #22c55e; }
+        
+        .window-content {
+            padding: 16px;
+            overflow: auto;
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .window-content > * {
+            flex: 1;
+            min-height: 0;
+        }
+        
+        .taskbar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 50px;
+            background: rgba(20, 20, 30, 0.95);
+            backdrop-filter: blur(20px);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            padding: 0 16px;
+            z-index: 1000;
+        }
+        
+        .taskbar-item {
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.15s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.8rem;
+            background: transparent;
+            border: none;
+            color: white;
+        }
+        
+        .taskbar-item:hover { background: rgba(255, 255, 255, 0.1); }
+        .taskbar-item.active { background: rgba(99, 102, 241, 0.3); border-bottom: 2px solid #6366f1; }
+        
+        .context-menu {
+            position: fixed;
+            background: rgba(30, 30, 40, 0.98);
+            backdrop-filter: blur(20px);
+            border-radius: 8px;
+            padding: 6px 0;
+            min-width: 160px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+            z-index: 2000;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .context-menu-item {
+            padding: 8px 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.8rem;
+            transition: background 0.15s;
+        }
+        
+        .context-menu-item:hover { background: rgba(99, 102, 241, 0.2); }
+        
+        .toast {
+            position: fixed;
+            bottom: 70px;
+            right: 20px;
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            z-index: 3000;
+            animation: slideIn 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        
+        .toast.success { background: rgba(34, 197, 94, 0.95); }
+        .toast.error { background: rgba(239, 68, 68, 0.95); }
+        .toast.info { background: rgba(99, 102, 241, 0.95); }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        
+        .fade-in { animation: fadeIn 0.2s ease; }
+        
+        /* AI Chat */
+        .chat-container {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            min-height: 200px;
+        }
+        
+        .chat-layout {
+            display: flex;
+            height: 100%;
+            overflow: hidden;
+        }
+        .chat-sidebar {
+            width: 200px;
+            min-width: 200px;
+            border-right: 1px solid rgba(255,255,255,0.1);
+            display: flex;
+            flex-direction: column;
+            background: rgba(0,0,0,0.2);
+        }
+        .chat-sidebar-header {
+            padding: 8px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .chat-sidebar-header button {
+            width: 100%;
+            padding: 8px 12px;
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            border: none;
+            border-radius: 8px;
+            color: white;
+            cursor: pointer;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        .chat-sidebar-header button:hover { opacity: 0.9; }
+        .chat-sidebar-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 4px;
+        }
+        .chat-sidebar-item {
+            padding: 8px 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            color: #9ca3af;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 2px;
+            position: relative;
+        }
+        .chat-sidebar-item:hover { background: rgba(255,255,255,0.08); color: #e5e7eb; }
+        .chat-sidebar-item.active { background: rgba(99,102,241,0.2); color: #a5b4fc; }
+        .chat-sidebar-item .conv-title { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+        .chat-sidebar-item .conv-delete {
+            opacity: 0;
+            color: #ef4444;
+            font-size: 0.65rem;
+            padding: 2px 4px;
+            border-radius: 4px;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .chat-sidebar-item:hover .conv-delete { opacity: 0.7; }
+        .chat-sidebar-item .conv-delete:hover { opacity: 1; background: rgba(239,68,68,0.2); }
+        .chat-main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+        .chat-messages {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .chat-message {
+            padding: 10px 14px;
+            border-radius: 12px;
+            max-width: 85%;
+            font-size: 0.85rem;
+            line-height: 1.4;
+            word-wrap: break-word;
+        }
+        
+        .chat-message.user {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            align-self: flex-end;
+        }
+        
+        .chat-message.assistant {
+            background: rgba(255, 255, 255, 0.1);
+            align-self: flex-start;
+        }
+        
+        .chat-input-area {
+            display: flex;
+            gap: 10px;
+            padding: 10px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            flex-shrink: 0;
+        }
+        
+        .chat-input {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 10px;
+            color: white;
+            outline: none;
+            font-family: inherit;
+            min-width: 0;
+        }
+        
+        .chat-send {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            border: none;
+            border-radius: 8px;
+            padding: 10px 16px;
+            color: white;
+            cursor: pointer;
+            font-weight: 500;
+            white-space: nowrap;
+        }
+        
+        .chat-send:hover { opacity: 0.9; }
+
+        /* Agent Steps */
+        .agent-steps {
+            background: rgba(99, 102, 241, 0.08);
+            border: 1px solid rgba(99, 102, 241, 0.15);
+            border-radius: 8px;
+            margin-bottom: 8px;
+            overflow: hidden;
+            font-size: 0.8rem;
+        }
+
+        .agent-steps-header {
+            padding: 8px 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #a5b4fc;
+            font-weight: 500;
+            user-select: none;
+        }
+
+        .agent-steps-header:hover {
+            background: rgba(99, 102, 241, 0.1);
+        }
+
+        .agent-steps-body {
+            display: none;
+            padding: 0 12px 10px;
+        }
+
+        .agent-steps-body.open {
+            display: block;
+        }
+
+        .agent-step {
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .agent-step:last-child {
+            border-bottom: none;
+        }
+
+        .agent-step-thought {
+            color: #94a3b8;
+            font-style: italic;
+            margin-bottom: 4px;
+        }
+
+        .agent-step-action {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: #fbbf24;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+        }
+
+        .agent-step-observation {
+            color: #86efac;
+            font-size: 0.75rem;
+            max-height: 100px;
+            overflow-y: auto;
+            margin-top: 4px;
+            padding: 6px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 4px;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .agent-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 14px;
+            border-radius: 12px;
+            background: rgba(99, 102, 241, 0.1);
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            font-size: 0.8rem;
+            color: #a5b4fc;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .agent-status .pulse {
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        /* Code Editor */
+        .code-editor-area {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            gap: 0;
+        }
+
+        .code-tabs {
+            display: flex;
+            gap: 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            flex-shrink: 0;
+        }
+
+        .code-tab {
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            color: #9ca3af;
+            border-bottom: 2px solid transparent;
+            transition: all 0.15s;
+            background: none;
+            border-top: none;
+            border-left: none;
+            border-right: none;
+        }
+
+        .code-tab:hover { color: #fff; background: rgba(255,255,255,0.05); }
+        .code-tab.active { color: #a5b4fc; border-bottom-color: #6366f1; background: rgba(99,102,241,0.1); }
+
+        .code-tab.python { color: #fbbf24; }
+        .code-tab.python.active { color: #fbbf24; border-bottom-color: #f59e0b; }
+        .code-tab.javascript { color: #facc15; }
+        .code-tab.javascript.active { color: #facc15; border-bottom-color: #eab308; }
+        .code-tab.wasm { color: #818cf8; }
+        .code-tab.wasm.active { color: #818cf8; border-bottom-color: #6366f1; }
+
+        .code-toolbar {
+            display: flex;
+            gap: 6px;
+            padding: 8px 10px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            flex-shrink: 0;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .code-toolbar button {
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 6px;
+            padding: 5px 12px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            color: #d1d5db;
+            background: rgba(255,255,255,0.03);
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            white-space: nowrap;
+        }
+
+        .code-toolbar button:hover { background: rgba(255,255,255,0.08); }
+        .code-toolbar .run-btn { background: rgba(34,197,94,0.15); border-color: rgba(34,197,94,0.3); color: #86efac; }
+        .code-toolbar .run-btn:hover { background: rgba(34,197,94,0.25); }
+
+        .code-input {
+            flex: 1;
+            min-height: 120px;
+            background: #0d0d12;
+            border: none;
+            padding: 12px;
+            color: #e2e8f0;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+            resize: none;
+            outline: none;
+            tab-size: 4;
+        }
+
+        .code-output-panel {
+            flex-shrink: 0;
+            max-height: 200px;
+            min-height: 60px;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .code-output-header {
+            padding: 6px 10px;
+            font-size: 0.7rem;
+            color: #6b7280;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .code-output {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            padding: 8px 12px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            color: #a3e635;
+            background: #0a0a0f;
+        }
+
+        .code-output .error { color: #f87171; }
+        .code-output .info { color: #60a5fa; }
+        .code-output .system { color: #6b7280; font-style: italic; }
+
+        .code-status {
+            padding: 4px 10px;
+            font-size: 0.7rem;
+            color: #6b7280;
+            border-top: 1px solid rgba(255,255,255,0.05);
+            flex-shrink: 0;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        /* Settings */
+        #settingsPanel select option {
+            background: #1e1e28;
+            color: #fff;
+        }
+
+        /* Terminal */
+        .terminal {
+            background: #000;
+            border-radius: 8px;
+            padding: 10px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            height: 100%;
+            min-height: 150px;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .terminal-output {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        
+        .terminal-line { margin-bottom: 2px; }
+        .terminal-prompt { color: #22c55e; }
+        .terminal-error { color: #ef4444; }
+        .terminal-success { color: #22c55e; }
+        .terminal-info { color: #6366f1; }
+        
+        .terminal-input-line {
+            display: flex;
+            align-items: center;
+            margin-top: 5px;
+            flex-shrink: 0;
+        }
+        
+        .terminal-input {
+            background: transparent;
+            border: none;
+            color: white;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            outline: none;
+            flex: 1;
+            min-width: 0;
+        }
+        
+        @media (max-width: 768px) {
+            .desktop-icon { width: 65px; padding: 8px; }
+            .desktop-icon i { font-size: 1.8rem; }
+            .desktop-icon span { font-size: 0.65rem; }
+            .window { min-width: 95% !important; width: 95% !important; }
+            .taskbar { height: 45px; }
+            .taskbar-item { padding: 6px 10px; font-size: 0.75rem; }
+        }
+        
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.05); }
+        ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.3); }
+        
+        /* File Grid */
+        .file-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+            gap: 10px;
+            padding: 10px;
+        }
+        
+        .file-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 12px 8px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.15s;
+            text-align: center;
+        }
+        
+        .file-item:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        .file-item.selected {
+            background: rgba(99, 102, 241, 0.3);
+            border: 1px solid rgba(99, 102, 241, 0.5);
+        }
+        
+        .file-item i {
+            font-size: 2rem;
+            margin-bottom: 6px;
+        }
+        
+        .file-item span {
+            font-size: 0.7rem;
+            word-break: break-word;
+            line-height: 1.2;
+            max-width: 70px;
+        }
+        
+        /* Context menu for file items */
+        .file-actions {
+            display: flex;
+            gap: 4px;
+            margin-top: 6px;
+            opacity: 0;
+            transition: opacity 0.15s;
+        }
+        
+        .file-item:hover .file-actions {
+            opacity: 1;
+        }
+        
+        .file-action-btn {
+            background: rgba(255,255,255,0.1);
+            border: none;
+            border-radius: 4px;
+            padding: 4px 6px;
+            cursor: pointer;
+            color: white;
+            font-size: 0.65rem;
+        }
+        
+        .file-action-btn:hover {
+            background: rgba(255,255,255,0.2);
+        }
+        
+        .file-action-btn.delete {
+            color: #ef4444;
+        }
+    </style>
+</head>
+<body class="text-white overflow-hidden">
+    <!-- Login Screen -->
+    <div id="loginScreen" class="min-h-screen flex items-center justify-center p-4">
+        <div class="desktop-bg"></div>
+        
+        <div class="login-card rounded-2xl p-8 w-full max-w-md fade-in">
+            <div class="text-center mb-8">
+                <div class="text-6xl mb-4">🦀</div>
+                <h1 class="text-3xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">Puterra</h1>
+                <p class="text-gray-400 mt-2">Cloud OS with AI</p>
+            </div>
+            
+            <div id="loginForm">
+                <div class="mb-4">
+                    <label class="block text-sm font-medium mb-2 text-gray-300">
+                        <i class="fas fa-user mr-2"></i>Username
+                    </label>
+                    <input type="text" id="username" 
+                           class="input-field w-full px-4 py-3 rounded-xl outline-none text-white"
+                           placeholder="Enter username" autocomplete="username">
+                </div>
+                <div class="mb-6">
+                    <label class="block text-sm font-medium mb-2 text-gray-300">
+                        <i class="fas fa-lock mr-2"></i>Password
+                    </label>
+                    <input type="password" id="password" 
+                           class="input-field w-full px-4 py-3 rounded-xl outline-none text-white"
+                           placeholder="Enter password" autocomplete="current-password">
+                </div>
+                <button onclick="login()" class="btn-primary w-full py-3 rounded-xl font-semibold text-white flex items-center justify-center gap-2">
+                    <i class="fas fa-sign-in-alt"></i>
+                    <span>Login</span>
+                </button>
+                <p class="text-center mt-6 text-gray-400">
+                    Don't have an account? 
+                    <button onclick="showSignup()" class="text-purple-400 hover:text-purple-300 font-medium">Sign Up</button>
+                </p>
+            </div>
+            
+            <div id="signupForm" class="hidden">
+                <div class="mb-4">
+                    <label class="block text-sm font-medium mb-2 text-gray-300">
+                        <i class="fas fa-user mr-2"></i>Username
+                    </label>
+                    <input type="text" id="newUsername" 
+                           class="input-field w-full px-4 py-3 rounded-xl outline-none text-white"
+                           placeholder="Choose username">
+                </div>
+                <div class="mb-6">
+                    <label class="block text-sm font-medium mb-2 text-gray-300">
+                        <i class="fas fa-lock mr-2"></i>Password
+                    </label>
+                    <input type="password" id="newPassword" 
+                           class="input-field w-full px-4 py-3 rounded-xl outline-none text-white"
+                           placeholder="Create password">
+                </div>
+                <button onclick="signup()" class="btn-primary w-full py-3 rounded-xl font-semibold text-white flex items-center justify-center gap-2">
+                    <i class="fas fa-user-plus"></i>
+                    <span>Create Account</span>
+                </button>
+                <p class="text-center mt-6 text-gray-400">
+                    Already have an account? 
+                    <button onclick="showLogin()" class="text-purple-400 hover:text-purple-300 font-medium">Login</button>
+                </p>
+            </div>
+            
+            <div id="errorMsg" class="hidden mt-4 p-3 rounded-xl bg-red-500/20 text-red-300 text-center text-sm"></div>
+            <div id="successMsg" class="hidden mt-4 p-3 rounded-xl bg-green-500/20 text-green-300 text-center text-sm"></div>
+        </div>
+    </div>
+    
+    <!-- Desktop -->
+    <div id="desktopScreen" class="hidden min-h-screen">
+        <div class="desktop-bg"></div>
+        
+        <div id="desktopArea" class="p-6 pb-16" style="height: calc(100vh - 50px); overflow-y: auto;">
+            <div id="desktopIcons" class="flex flex-wrap gap-3"></div>
+        </div>
+        
+        <div class="taskbar">
+            <button onclick="openApp('files')" class="taskbar-item" id="taskbar-files">
+                <i class="fas fa-folder"></i>
+                <span class="hidden sm:inline">Files</span>
+            </button>
+            <button onclick="openApp('ai')" class="taskbar-item" id="taskbar-ai">
+                <i class="fas fa-robot"></i>
+                <span class="hidden sm:inline">AI</span>
+            </button>
+            <button onclick="openApp('terminal')" class="taskbar-item" id="taskbar-terminal">
+                <i class="fas fa-terminal"></i>
+                <span class="hidden sm:inline">Terminal</span>
+            </button>
+            <button onclick="openApp('code')" class="taskbar-item" id="taskbar-code">
+                <i class="fas fa-code"></i>
+                <span class="hidden sm:inline">Code</span>
+            </button>
+            <button onclick="openApp('settings')" class="taskbar-item" id="taskbar-settings">
+                <i class="fas fa-cog"></i>
+                <span class="hidden sm:inline">Settings</span>
+            </button>
+            
+            <div class="flex items-center gap-3 ml-auto">
+                <span id="userDisplay" class="text-sm text-gray-400 hidden sm:inline"></span>
+                <button onclick="logout()" class="taskbar-item text-red-400 hover:text-red-300">
+                    <i class="fas fa-sign-out-alt"></i>
+                </button>
+            </div>
+        </div>
+        
+        <div id="windowsContainer"></div>
+        
+        <div id="contextMenu" class="context-menu hidden">
+            <div class="context-menu-item" onclick="createNewFolder()">
+                <i class="fas fa-folder-plus"></i>
+                <span>New Folder</span>
+            </div>
+            <div class="context-menu-item" onclick="createNewFile()">
+                <i class="fas fa-file-plus"></i>
+                <span>New File</span>
+            </div>
+            <div class="context-menu-item" onclick="uploadFile()">
+                <i class="fas fa-upload"></i>
+                <span>Upload</span>
+            </div>
+            <div class="context-menu-divider" style="height:1px;background:rgba(255,255,255,0.1);margin:4px 0;"></div>
+            <div class="context-menu-item" onclick="downloadSelected()" id="downloadMenuItem">
+                <i class="fas fa-download"></i>
+                <span>Download</span>
+            </div>
+            <div class="context-menu-item" onclick="renameSelected()" id="renameMenuItem">
+                <i class="fas fa-edit"></i>
+                <span>Rename</span>
+            </div>
+            <div class="context-menu-item" onclick="deleteSelected()" style="color:#ef4444;" id="deleteMenuItem">
+                <i class="fas fa-trash"></i>
+                <span>Delete</span>
+            </div>
+            <div class="context-menu-divider" style="height:1px;background:rgba(255,255,255,0.1);margin:4px 0;"></div>
+            <div class="context-menu-item" onclick="refresh()">
+                <i class="fas fa-sync"></i>
+                <span>Refresh</span>
+            </div>
+        </div>
+        
+        <div id="toastContainer"></div>
+    </div>
+    
+    <script>
+        const API = '/api';
+        let currentUser = null;
+        let files = [];
+        let selectedItems = [];
+        let openWindows = {};
+        let windowZIndex = 100;
+        let chatHistory = [];
+        let cachedSettings = null;
+        let conversations = []; // [{id, title, messages, html, created}]
+        let activeConversationId = null;
+        
+        // Toast
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.innerHTML = `<i class="fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle'}"></i>${message}`;
+            container.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+        
+        // Show/hide forms
+        function showSignup() {
+            document.getElementById('loginForm').classList.add('hidden');
+            document.getElementById('signupForm').classList.remove('hidden');
+            document.getElementById('errorMsg').classList.add('hidden');
+            document.getElementById('successMsg').classList.add('hidden');
+        }
+        
+        function showLogin() {
+            document.getElementById('signupForm').classList.add('hidden');
+            document.getElementById('loginForm').classList.remove('hidden');
+            document.getElementById('errorMsg').classList.add('hidden');
+            document.getElementById('successMsg').classList.add('hidden');
+        }
+        
+        function showError(msg) {
+            const el = document.getElementById('errorMsg');
+            el.textContent = msg;
+            el.classList.remove('hidden');
+            setTimeout(() => el.classList.add('hidden'), 3000);
+        }
+        
+        function showSuccess(msg) {
+            const el = document.getElementById('successMsg');
+            el.textContent = msg;
+            el.classList.remove('hidden');
+            setTimeout(() => el.classList.add('hidden'), 3000);
+        }
+        
+        // Login
+        async function login() {
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+            
+            if (!username || !password) {
+                showError('Please fill all fields');
+                return;
+            }
+            
+            try {
+                const res = await fetch(`${API}/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    localStorage.setItem('user', JSON.stringify(data.user));
+                    currentUser = data.user;
+                    showDesktop();
+                    showToast(`Welcome, ${data.user.username}!`, 'success');
+                } else {
+                    showError(data.error || 'Login failed');
+                }
+            } catch (e) {
+                showError('Connection error');
+            }
+        }
+        
+        // Signup
+        async function signup() {
+            const username = document.getElementById('newUsername').value.trim();
+            const password = document.getElementById('newPassword').value;
+            
+            if (!username || !password) {
+                showError('Please fill all fields');
+                return;
+            }
+            
+            if (username.length < 3) {
+                showError('Username must be at least 3 characters');
+                return;
+            }
+            
+            if (password.length < 6) {
+                showError('Password must be at least 6 characters');
+                return;
+            }
+            
+            try {
+                const res = await fetch(`${API}/signup`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    showLogin();
+                    showSuccess('Account created! Please login.');
+                } else {
+                    showError(data.error || 'Signup failed');
+                }
+            } catch (e) {
+                showError('Connection error');
+            }
+        }
+        
+        // Logout
+        async function logout() {
+            await fetch(`${API}/logout`, { method: 'POST' });
+            localStorage.removeItem('user');
+            currentUser = null;
+            document.getElementById('loginScreen').classList.remove('hidden');
+            document.getElementById('desktopScreen').classList.add('hidden');
+        }
+        
+        // Show desktop
+        function showDesktop() {
+            document.getElementById('loginScreen').classList.add('hidden');
+            document.getElementById('desktopScreen').classList.remove('hidden');
+            document.getElementById('userDisplay').textContent = currentUser?.username || 'Guest';
+            loadFiles();
+        }
+        
+        // Check session on load - require login
+        function checkSession() {
+            const savedUser = localStorage.getItem('puterra_user');
+            if (savedUser) {
+                currentUser = JSON.parse(savedUser);
+                showDesktop();
+                restoreChatHistory();
+            }
+            // If no saved user, stay on login screen
+        }
+        
+        // ============ CONVERSATION MANAGEMENT ============
+
+        const WELCOME_HTML = `<div class="chat-message assistant">
+            🤖 <b>Puterra AI Agent</b><br><br>
+            Ben bir <b>agentic AI</b>'yım - soru sorabilir, dosya işlemleri yaptırabilir, web araması yapabilir ve daha fazlasını isteyebilirsiniz.<br><br>
+            <b>🔧 Araçlarım:</b> Web Arama, URL Fetch, Dosya Okuma/Yazma, Shell, Hafıza, PDF Oluştur<br>
+            <b>💡 Örnek:</b> "Bugün KKTC'de hava nasıl?", "notes.txt oluştur", "Python ile fibonacci yaz"
+        </div>`;
+
+        function loadConversations() {
+            try {
+                const saved = localStorage.getItem('puterra_conversations');
+                conversations = saved ? JSON.parse(saved) : [];
+            } catch (e) {
+                conversations = [];
+            }
+            // Migrate old single-chat format
+            if (conversations.length === 0) {
+                const oldHistory = localStorage.getItem('puterra_chat_history');
+                const oldHtml = localStorage.getItem('puterra_chat_html');
+                if (oldHistory || oldHtml) {
+                    const conv = {
+                        id: Date.now().toString(),
+                        title: 'Önceki Sohbet',
+                        messages: oldHistory ? JSON.parse(oldHistory) : [],
+                        html: oldHtml || WELCOME_HTML,
+                        created: Date.now()
+                    };
+                    conversations.push(conv);
+                    saveConversations();
+                    localStorage.removeItem('puterra_chat_history');
+                    localStorage.removeItem('puterra_chat_html');
+                }
+            }
+            renderConversationList();
+        }
+
+        function saveConversations() {
+            localStorage.setItem('puterra_conversations', JSON.stringify(conversations));
+            if (activeConversationId) {
+                localStorage.setItem('puterra_active_conversation', activeConversationId);
+            }
+        }
+
+        function newConversation() {
+            // Save current conversation first
+            saveActiveConversation();
+
+            const conv = {
+                id: Date.now().toString(),
+                title: 'Yeni Sohbet',
+                messages: [],
+                html: WELCOME_HTML,
+                created: Date.now()
+            };
+            conversations.unshift(conv);
+            activeConversationId = conv.id;
+            chatHistory = [];
+            saveConversations();
+            renderConversationList();
+
+            const messagesDiv = document.getElementById('chatMessages');
+            if (messagesDiv) {
+                messagesDiv.innerHTML = WELCOME_HTML;
+            }
+        }
+
+        function switchConversation(id) {
+            if (id === activeConversationId) return;
+            // Save current
+            saveActiveConversation();
+            // Load target
+            activeConversationId = id;
+            const conv = conversations.find(c => c.id === id);
+            if (conv) {
+                chatHistory = conv.messages ? [...conv.messages] : [];
+                const messagesDiv = document.getElementById('chatMessages');
+                if (messagesDiv) {
+                    messagesDiv.innerHTML = conv.html || WELCOME_HTML;
+                    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                }
+            }
+            renderConversationList();
+        }
+
+        function deleteConversation(id, event) {
+            event.stopPropagation();
+            conversations = conversations.filter(c => c.id !== id);
+            saveConversations();
+            if (id === activeConversationId) {
+                if (conversations.length > 0) {
+                    switchConversation(conversations[0].id);
+                } else {
+                    newConversation();
+                }
+            }
+            renderConversationList();
+        }
+
+        function saveActiveConversation() {
+            if (!activeConversationId) return;
+            const conv = conversations.find(c => c.id === activeConversationId);
+            if (conv) {
+                conv.messages = [...chatHistory];
+                const messagesDiv = document.getElementById('chatMessages');
+                if (messagesDiv) {
+                    conv.html = messagesDiv.innerHTML;
+                }
+            }
+            saveConversations();
+        }
+
+        // Auto-title: use first user message as title (max 30 chars)
+        function updateConversationTitle(text) {
+            const conv = conversations.find(c => c.id === activeConversationId);
+            if (conv && conv.title === 'Yeni Sohbet') {
+                conv.title = text.length > 30 ? text.substring(0, 30) + '...' : text;
+                saveConversations();
+                renderConversationList();
+            }
+        }
+
+        function renderConversationList() {
+            const list = document.getElementById('conversationList');
+            if (!list) return;
+
+            if (conversations.length === 0) {
+                list.innerHTML = '<div style="text-align:center;color:#6b7280;padding:20px;font-size:0.75rem;">Henüz sohbet yok</div>';
+                return;
+            }
+
+            list.innerHTML = conversations.map(c => {
+                const isActive = c.id === activeConversationId;
+                const date = new Date(c.created);
+                const dateStr = date.toLocaleDateString('tr-TR', { day: '2-digit', month: 'short' });
+                const msgCount = c.messages ? c.messages.length : 0;
+                return `<div class="chat-sidebar-item ${isActive ? 'active' : ''}" onclick="switchConversation('${c.id}')">
+                    <i class="fas fa-comment" style="font-size:0.65rem;flex-shrink:0;"></i>
+                    <span class="conv-title" title="${escapeHtml(c.title)}">${escapeHtml(c.title)}</span>
+                    <span class="conv-delete" onclick="deleteConversation('${c.id}', event)" title="Sil"><i class="fas fa-times"></i></span>
+                </div>`;
+            }).join('');
+        }
+
+        // Save chat to history (backwards compatible wrapper)
+        function saveChatHistory() {
+            saveActiveConversation();
+        }
+
+        // Restore chat history (called on page load / session restore)
+        function restoreChatHistory() {
+            // Just load conversations from localStorage, don't touch DOM yet
+            // (AI Chat window may not be open yet - DOM restoration happens in openApp)
+            try {
+                const saved = localStorage.getItem('puterra_conversations');
+                conversations = saved ? JSON.parse(saved) : [];
+            } catch (e) {
+                conversations = [];
+            }
+            // Restore active conversation ID
+            const savedActiveId = localStorage.getItem('puterra_active_conversation');
+            if (savedActiveId && conversations.find(c => c.id === savedActiveId)) {
+                activeConversationId = savedActiveId;
+                const conv = conversations.find(c => c.id === savedActiveId);
+                chatHistory = conv.messages ? [...conv.messages] : [];
+            } else if (conversations.length > 0) {
+                activeConversationId = conversations[0].id;
+                chatHistory = conversations[0].messages ? [...conversations[0].messages] : [];
+            }
+        }
+
+        // Clear chat history (clears active conversation only)
+        function clearChatHistory() {
+            chatHistory = [];
+            const messagesDiv = document.getElementById('chatMessages');
+            if (messagesDiv) {
+                messagesDiv.innerHTML = WELCOME_HTML;
+            }
+            // Update active conversation
+            const conv = conversations.find(c => c.id === activeConversationId);
+            if (conv) {
+                conv.messages = [];
+                conv.html = WELCOME_HTML;
+                conv.title = 'Yeni Sohbet';
+                saveConversations();
+                renderConversationList();
+            }
+        }
+        
+        // Show AI help
+        function showAIHelp() {
+            const helpText = `🤖 <b>AI Assistant Commands:</b>
+<br><br>
+<b>📁 File Operations:</b>
+<br>• <code>create file xx.txt</code> - Create a new file
+<br>• <code>write "content" to xx.txt</code> - Write to a file
+<br>• <code>read xx.txt</code> - Read file content
+<br>• <code>delete xx.txt</code> - Delete a file
+<br>• <code>files</code> or <code>list</code> - Show all files
+<br><br>
+<b>🌐 Web Search:</b>
+<br>• Any question will be searched if needed
+<br><br>
+<b>💻 Terminal:</b>
+<br>• Open Terminal app for shell commands`;
+            const messagesDiv = document.getElementById('chatMessages');
+            messagesDiv.innerHTML += `<div class="chat-message assistant">${helpText}</div>`;
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+        
+        // Load files
+        async function loadFiles() {
+            const username = currentUser?.username || 'guest';
+            try {
+                const res = await fetch(`${API}/files/${username}`);
+                const data = await res.json();
+                
+                if (data.success) {
+                    files = data.files || [];
+                    renderDesktop();
+                }
+            } catch (e) {
+                showToast('Failed to load files', 'error');
+            }
+        }
+        
+        // Render desktop
+        function renderDesktop() {
+            const container = document.getElementById('desktopIcons');
+            
+            let html = `
+                <div class="desktop-icon" ondblclick="openApp('files')">
+                    <i class="fas fa-folder text-yellow-400"></i>
+                    <span>Files</span>
+                </div>
+                <div class="desktop-icon" ondblclick="openApp('ai')">
+                    <i class="fas fa-robot text-purple-400"></i>
+                    <span>AI Chat</span>
+                </div>
+                <div class="desktop-icon" ondblclick="openApp('terminal')">
+                    <i class="fas fa-terminal text-green-400"></i>
+                    <span>Terminal</span>
+                </div>
+                <div class="desktop-icon" ondblclick="openApp('code')">
+                    <i class="fas fa-code text-emerald-400"></i>
+                    <span>Code</span>
+                </div>
+                <div class="desktop-icon" ondblclick="openApp('settings')">
+                    <i class="fas fa-cog text-gray-400"></i>
+                    <span>Settings</span>
+                </div>
+            `;
+            
+            files.forEach((file, i) => {
+                const icon = file.is_dir ? 'fa-folder text-yellow-400' : getFileIcon(file.name);
+                html += `
+                    <div class="desktop-icon ${selectedItems.includes(i) ? 'selected' : ''}" 
+                         onclick="selectItem(event, ${i})" 
+                         ondblclick="openFile('${file.name}', ${file.is_dir})">
+                        <i class="fas ${icon}"></i>
+                        <span>${file.name}</span>
+                    </div>
+                `;
+            });
+            
+            container.innerHTML = html;
+        }
+        
+        // Get file icon
+        function getFileIcon(filename) {
+            const ext = filename.split('.').pop().toLowerCase();
+            const icons = {
+                'pdf': 'fa-file-pdf text-red-400',
+                'doc': 'fa-file-word text-blue-400',
+                'docx': 'fa-file-word text-blue-400',
+                'js': 'fa-file-code text-yellow-400',
+                'py': 'fa-file-code text-blue-400',
+                'rs': 'fa-file-code text-orange-400',
+                'html': 'fa-file-code text-orange-400',
+                'css': 'fa-file-code text-blue-400',
+                'json': 'fa-file-code text-yellow-400',
+                'txt': 'fa-file-alt text-gray-400',
+                'md': 'fa-file-alt text-gray-400',
+                'jpg': 'fa-file-image text-purple-400',
+                'jpeg': 'fa-file-image text-purple-400',
+                'png': 'fa-file-image text-purple-400',
+                'gif': 'fa-file-image text-purple-400',
+                'mp3': 'fa-file-audio text-pink-400',
+                'mp4': 'fa-file-video text-red-400',
+                'zip': 'fa-file-archive text-yellow-400',
+            };
+            return icons[ext] || 'fa-file text-gray-400';
+        }
+        
+        // Select item
+        function selectItem(event, index) {
+            if (event.ctrlKey || event.metaKey) {
+                const idx = selectedItems.indexOf(index);
+                if (idx > -1) selectedItems.splice(idx, 1);
+                else selectedItems.push(index);
+            } else {
+                selectedItems = [index];
+            }
+            renderDesktop();
+        }
+        
+        // Open app
+        function openApp(app) {
+            document.querySelectorAll('.taskbar-item').forEach(el => el.classList.remove('active'));
+            document.getElementById(`taskbar-${app}`)?.classList.add('active');
+            // DON'T clear windowsContainer - keep existing windows
+            
+            // Check if window already exists
+            const existingWin = document.getElementById(`window-${app}`);
+            if (existingWin) {
+                // Just bring it to front
+                existingWin.style.zIndex = ++windowZIndex;
+                existingWin.classList.remove('minimized');
+                return;
+            }
+            
+            if (app === 'files') {
+                createWindow('files', '📁 Files', `
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                        <div style="display:flex;gap:8px;">
+                            <button onclick="createNewFolder()" style="background:rgba(234,179,8,0.2);border:1px solid rgba(234,179,8,0.3);color:#fbbf24;border-radius:6px;padding:6px 12px;cursor:pointer;">
+                                <i class="fas fa-folder-plus"></i> New Folder
+                            </button>
+                            <button onclick="createNewFile()" style="background:rgba(99,102,241,0.2);border:1px solid rgba(99,102,241,0.3);color:#818cf8;border-radius:6px;padding:6px 12px;cursor:pointer;">
+                                <i class="fas fa-file-plus"></i> New File
+                            </button>
+                            <button onclick="uploadFile()" style="background:rgba(34,197,94,0.2);border:1px solid rgba(34,197,94,0.3);color:#22c55e;border-radius:6px;padding:6px 12px;cursor:pointer;">
+                                <i class="fas fa-upload"></i> Upload
+                            </button>
+                        </div>
+                        <div style="display:flex;gap:4px;">
+                            <button onclick="downloadSelected()" style="background:transparent;border:1px solid rgba(255,255,255,0.2);color:#9ca3af;border-radius:6px;padding:6px 10px;cursor:pointer;" title="Download">
+                                <i class="fas fa-download"></i>
+                            </button>
+                            <button onclick="renameSelected()" style="background:transparent;border:1px solid rgba(255,255,255,0.2);color:#9ca3af;border-radius:6px;padding:6px 10px;cursor:pointer;" title="Rename">
+                                <i class="fas fa-edit"></i>
+                            </button>
+                            <button onclick="deleteSelected()" style="background:transparent;border:1px solid rgba(239,68,68,0.3);color:#ef4444;border-radius:6px;padding:6px 10px;cursor:pointer;" title="Delete">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                            <button onclick="loadFiles()" style="background:transparent;border:1px solid rgba(255,255,255,0.2);color:#9ca3af;border-radius:6px;padding:6px 10px;cursor:pointer;" title="Refresh">
+                                <i class="fas fa-sync"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="file-grid" id="fileGrid">
+                        ${files.length === 0 ? '<div style="grid-column:1/-1;text-align:center;color:#6b7280;padding:40px;"><i class="fas fa-folder-open" style="font-size:3rem;margin-bottom:12px;opacity:0.3;"></i><p>No files yet</p><p style="font-size:0.75rem;margin-top:4px;">Right-click to create folders and files</p></div>' : ''}
+                        ${files.map((file, i) => `
+                            <div class="file-item ${selectedItems.includes(i) ? 'selected' : ''}" 
+                                 onclick="selectItem(event, ${i})"
+                                 ondblclick="openFile('${file.name}', ${file.is_dir})">
+                                <i class="fas ${file.is_dir ? 'fa-folder text-yellow-400' : getFileIcon(file.name)}"></i>
+                                <span>${file.name}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                `, 650, 450);
+            } else if (app === 'ai') {
+                createWindow('ai', '🤖 AI Assistant', `
+                    <div class="chat-layout">
+                        <div class="chat-sidebar">
+                            <div class="chat-sidebar-header">
+                                <button onclick="newConversation()"><i class="fas fa-plus"></i> Yeni Sohbet</button>
+                            </div>
+                            <div class="chat-sidebar-list" id="conversationList"></div>
+                        </div>
+                        <div class="chat-main">
+                            <div class="chat-container">
+                                <div class="chat-messages" id="chatMessages">
+                                    <div class="chat-message assistant">
+                                        🤖 <b>Puterra AI Agent</b><br><br>
+                                        Ben bir <b>agentic AI</b>'yım - soru sorabilir, dosya işlemleri yaptırabilir, web araması yapabilir ve daha fazlasını isteyebilirsiniz. Araçlarımı otomatik olarak seçer ve zincirleme kullanırım.<br><br>
+                                        <b>🔧 Araçlarım:</b> Web Arama, URL Fetch, Dosya Okuma/Yazma, Shell, Hafıza, PDF Oluştur<br>
+                                        <b>💡 Örnek:</b> "Bugün KKTC'de hava nasıl?", "notes.txt oluştur", "Python ile fibonacci yaz"
+                                    </div>
+                                </div>
+                                <div class="chat-input-area">
+                                    <input type="text" class="chat-input" id="chatInput" placeholder="Ask anything..." onkeypress="if(event.key==='Enter')sendChat()">
+                                    <button class="chat-send" onclick="sendChat()">
+                                        <i class="fas fa-paper-plane"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `, 750, 480);
+                // Small delay so DOM is ready, then load conversations
+                setTimeout(() => {
+                    loadConversations();
+                    if (conversations.length === 0) {
+                        newConversation();
+                    } else if (activeConversationId) {
+                        // Restore active conversation into the chat area
+                        const conv = conversations.find(c => c.id === activeConversationId);
+                        if (conv) {
+                            chatHistory = conv.messages ? [...conv.messages] : [];
+                            const messagesDiv = document.getElementById('chatMessages');
+                            if (messagesDiv) {
+                                messagesDiv.innerHTML = conv.html || WELCOME_HTML;
+                                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                            }
+                        }
+                        renderConversationList();
+                    } else {
+                        // No active conversation, pick first one
+                        activeConversationId = conversations[0].id;
+                        const conv = conversations[0];
+                        chatHistory = conv.messages ? [...conv.messages] : [];
+                        const messagesDiv = document.getElementById('chatMessages');
+                        if (messagesDiv) {
+                            messagesDiv.innerHTML = conv.html || WELCOME_HTML;
+                            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                        }
+                        renderConversationList();
+                    }
+                }, 50);
+            } else if (app === 'terminal') {
+                createWindow('terminal', 'Terminal', `
+                    <div class="terminal">
+                        <div class="terminal-output" id="terminalOutput">
+                            <div class="terminal-line"><span class="terminal-prompt">puterra@cloud:~$</span> Welcome to Puterra Terminal</div>
+                            <div class="terminal-line terminal-info">Type 'help' for available commands</div>
+                        </div>
+                        <div class="terminal-input-line">
+                            <span class="terminal-prompt">$</span>
+                            <input type="text" class="terminal-input" id="terminalInput" placeholder="Type a command..." onkeypress="if(event.key==='Enter')executeCommand()">
+                        </div>
+                    </div>
+                `, 600, 350);
+            } else if (app === 'code') {
+                createWindow('code', '⚡ Code', `
+                    <div class="code-editor-area">
+                        <div class="code-tabs">
+                            <button class="code-tab python active" onclick="switchCodeTab('python')">
+                                <i class="fab fa-python"></i> Python
+                            </button>
+                            <button class="code-tab javascript" onclick="switchCodeTab('javascript')">
+                                <i class="fab fa-js-square"></i> JavaScript
+                            </button>
+                            <button class="code-tab wasm" onclick="switchCodeTab('wasm')">
+                                <i class="fas fa-microchip"></i> WASM
+                            </button>
+                        </div>
+                        <div class="code-toolbar">
+                            <button class="run-btn" onclick="runCode()"><i class="fas fa-play"></i> Run</button>
+                            <button onclick="runCodeServer()"><i class="fas fa-server"></i> Run Server</button>
+                            <select id="codeRunMode" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.15);border-radius:6px;padding:4px 8px;color:#d1d5db;font-size:0.75rem;">
+                                <option value="browser">Browser</option>
+                                <option value="server">Server</option>
+                            </select>
+                            <div style="flex:1;"></div>
+                            <button onclick="saveCodeToFile()"><i class="fas fa-save"></i> Save</button>
+                            <button onclick="loadCodeFromFile()"><i class="fas fa-folder-open"></i> Load</button>
+                            <button onclick="installPyPackage()"><i class="fas fa-cube"></i> pip install</button>
+                            <button onclick="registerAsTool()"><i class="fas fa-puzzle-piece"></i> Register Tool</button>
+                        </div>
+                        <textarea class="code-input" id="codeInput" spellcheck="false"
+                            placeholder="Write your code here..."
+                            onkeydown="handleCodeKeydown(event)"></textarea>
+                        <div class="code-output-panel">
+                            <div class="code-output-header">
+                                <span>Output</span>
+                                <button onclick="clearCodeOutput()" style="background:none;border:none;color:#6b7280;cursor:pointer;font-size:0.7rem;">Clear</button>
+                            </div>
+                            <div class="code-output" id="codeOutput"><span class="system">Ready. Select a language and click Run.</span></div>
+                        </div>
+                        <div class="code-status">
+                            <span id="codeLang">Python (Pyodide - Browser)</span>
+                            <span id="codeTimer"></span>
+                        </div>
+                    </div>
+                `, 700, 550);
+                // Set default code
+                setTimeout(() => {
+                    const input = document.getElementById('codeInput');
+                    if (input && !input.value) {
+                        input.value = codeSamples.python;
+                    }
+                }, 50);
+
+            } else if (app === 'settings') {
+                createWindow('settings', '⚙️ Settings', `
+                    <div style="padding:10px;overflow-y:auto;height:100%;" id="settingsPanel">
+                        <div style="display:flex;flex-direction:column;gap:20px;">
+
+                            <!-- Account -->
+                            <div>
+                                <h3 style="margin-bottom:10px;color:#a5b4fc;font-size:0.9rem;text-transform:uppercase;letter-spacing:1px;">
+                                    <i class="fas fa-user"></i> Account
+                                </h3>
+                                <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px;">
+                                    <p style="color:#9ca3af;font-size:0.85rem;">Username: <strong style="color:#fff;">${currentUser?.username || 'Unknown'}</strong></p>
+                                    <p style="color:#9ca3af;font-size:0.85rem;margin-top:4px;">Files: <strong style="color:#fff;">${files.length}</strong></p>
+                                </div>
+                            </div>
+
+                            <!-- LLM Settings -->
+                            <div>
+                                <h3 style="margin-bottom:10px;color:#a5b4fc;font-size:0.9rem;text-transform:uppercase;letter-spacing:1px;">
+                                    <i class="fas fa-brain"></i> LLM / AI Model
+                                </h3>
+                                <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:10px;">
+                                    <div>
+                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Provider</label>
+                                        <select id="set_llm_provider" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;">
+                                            <option value="ollama">Ollama (Local / Cloud)</option>
+                                            <option value="openai">OpenAI Compatible</option>
+                                            <option value="custom">Custom</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">API URL</label>
+                                        <input type="text" id="set_llm_url" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="http://localhost:11434/api">
+                                    </div>
+                                    <div>
+                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Model</label>
+                                        <input type="text" id="set_llm_model" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="llama3.2">
+                                    </div>
+                                    <div>
+                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">API Key <span style="color:#6b7280;">(optional)</span></label>
+                                        <input type="password" id="set_llm_key" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="Leave empty if not required">
+                                    </div>
+                                    <button onclick="testLLM()" style="background:rgba(99,102,241,0.2);border:1px solid rgba(99,102,241,0.3);color:#818cf8;border-radius:6px;padding:8px 12px;cursor:pointer;font-size:0.8rem;display:flex;align-items:center;gap:6px;align-self:flex-start;">
+                                        <i class="fas fa-plug"></i> Test Connection
+                                    </button>
+                                    <div id="llmTestResult" style="display:none;font-size:0.8rem;padding:8px;border-radius:6px;"></div>
+                                </div>
+                            </div>
+
+                            <!-- Agent Settings -->
+                            <div>
+                                <h3 style="margin-bottom:10px;color:#a5b4fc;font-size:0.9rem;text-transform:uppercase;letter-spacing:1px;">
+                                    <i class="fas fa-robot"></i> Agent
+                                </h3>
+                                <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:10px;">
+                                    <div>
+                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Max Agent Iterations</label>
+                                        <input type="number" id="set_max_iterations" class="input-field" style="width:120px;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" min="1" max="20" value="6">
+                                        <span style="color:#6b7280;font-size:0.7rem;margin-left:8px;">1-20 arası (araç zinciri derinliği)</span>
+                                    </div>
+                                    <div>
+                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Search Engine</label>
+                                        <select id="set_search_engine" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;">
+                                            <option value="duckduckgo">DuckDuckGo (Integrated)</option>
+                                            <option value="ollama">Ollama Cloud (API Key required)</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Security -->
+                            <div>
+                                <h3 style="margin-bottom:10px;color:#a5b4fc;font-size:0.9rem;text-transform:uppercase;letter-spacing:1px;">
+                                    <i class="fas fa-shield-alt"></i> Security
+                                </h3>
+                                <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:10px;">
+                                    <div style="display:flex;align-items:center;gap:10px;">
+                                        <label style="color:#9ca3af;font-size:0.85rem;flex:1;">Shell Access</label>
+                                        <label style="position:relative;display:inline-block;width:44px;height:24px;cursor:pointer;">
+                                            <input type="checkbox" id="set_shell_enabled" style="display:none;" checked>
+                                            <span class="toggle-slider" style="position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(255,255,255,0.1);border-radius:12px;transition:0.2s;"></span>
+                                        </label>
+                                    </div>
+                                    <div>
+                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Admin Password</label>
+                                        <input type="password" id="set_admin_pw" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="Change admin password...">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Save Button -->
+                            <div style="display:flex;gap:8px;">
+                                <button onclick="saveSettings()" style="background:linear-gradient(135deg,#22c55e,#16a34a);border:none;border-radius:8px;padding:10px 24px;color:#fff;cursor:pointer;font-weight:600;font-size:0.85rem;display:flex;align-items:center;gap:6px;">
+                                    <i class="fas fa-save"></i> Save Settings
+                                </button>
+                                <button onclick="loadSettingsUI()" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px 16px;color:#9ca3af;cursor:pointer;font-size:0.85rem;">
+                                    <i class="fas fa-undo"></i> Reset
+                                </button>
+                            </div>
+
+                        </div>
+                    </div>
+                `, 500, 580);
+                // Load current settings into the form
+                loadSettingsUI();
+            }
+            
+            showToast(`Opening ${app}...`, 'info');
+        }
+        
+        // Convert markdown to HTML (with proper line breaks)
+        function markdownToHtml(text) {
+            // First escape HTML for safety
+            let html = text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+            
+            // Split by lines
+            const lines = html.split('\n');
+            let result = [];
+            
+            for (let line of lines) {
+                // Headers
+                if (line.startsWith('### ')) {
+                    result.push('<h4 style="margin:10px 0 4px;font-weight:600;">' + line.slice(4) + '</h4>');
+                } else if (line.startsWith('## ')) {
+                    result.push('<h3 style="margin:12px 0 6px;font-weight:600;">' + line.slice(3) + '</h3>');
+                } else if (line.startsWith('# ')) {
+                    result.push('<h2 style="margin:14px 0 8px;font-weight:600;font-size:1.1em;">' + line.slice(2) + '</h2>');
+                } else if (line === '---') {
+                    result.push('<hr style="border:none;border-top:1px solid rgba(255,255,255,0.2);margin:12px 0;">');
+                } else if (line.startsWith('- ')) {
+                    result.push('<div style="margin-left:12px;">• ' + line.slice(2) + '</div>');
+                } else {
+                    // Process inline markdown
+                    line = line
+                        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                        .replace(/\*(.*?)\*/g, '<em>$1</em>');
+                    result.push(line);
+                }
+            }
+            
+            return result.join('<br>');
+        }
+        
+        // Chat - uses the Agent endpoint with ReAct loop
+        async function sendChat() {
+            const input = document.getElementById('chatInput');
+            const message = input.value.trim();
+            if (!message) return;
+            input.value = '';
+
+            // Handle special commands before adding to history
+            if (/^(?:new chat|yeni sohbet)$/i.test(message)) {
+                newConversation();
+                return;
+            }
+            if (/^(?:clear|temizle)$/i.test(message)) {
+                clearChatHistory();
+                return;
+            }
+
+            // Ensure we have an active conversation
+            if (!activeConversationId) {
+                newConversation();
+            }
+
+            const messagesDiv = document.getElementById('chatMessages');
+            messagesDiv.innerHTML += `<div class="chat-message user">${escapeHtml(message)}</div>`;
+
+            // Add to active conversation's history
+            chatHistory.push({ role: 'user', content: message });
+            updateConversationTitle(message);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+            // Add loading indicator
+            const loadingId = 'loading-' + Date.now();
+            messagesDiv.innerHTML += `<div class="agent-status" id="${loadingId}">
+                <i class="fas fa-brain pulse"></i>
+                <span>Agent düşünüyor...</span>
+            </div>`;
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+            const username = currentUser?.username || 'guest';
+
+            try {
+                // Call the agent endpoint
+                const res = await fetch(`${API}/agent`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: message,
+                        history: chatHistory.slice(-10),
+                        model: cachedSettings?.llm_model || undefined,
+                        username: username,
+                    })
+                });
+
+                const data = await res.json();
+                document.getElementById(loadingId)?.remove();
+
+                if (data.success || data.answer) {
+                    // Show agent steps if any
+                    if (data.steps && data.steps.length > 0) {
+                        const stepsHtml = renderAgentSteps(data.steps);
+                        messagesDiv.innerHTML += stepsHtml;
+                    }
+
+                    // Show final answer
+                    const answer = data.answer || data.error || 'No response received from LLM. Check Settings > LLM connection.';
+                    messagesDiv.innerHTML += `<div class="chat-message assistant">${markdownToHtml(answer)}</div>`;
+                    chatHistory.push({ role: 'assistant', content: answer });
+
+                    // Refresh files in case agent modified them
+                    loadFiles();
+                } else {
+                    const errMsg = data.answer || data.error || 'Agent failed. Check LLM connection in Settings.';
+                    messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">${escapeHtml(errMsg)}</div>`;
+                }
+            } catch (e) {
+                document.getElementById(loadingId)?.remove();
+                messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">Connection error: ${e.message}</div>`;
+            }
+
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            saveChatHistory();
+        }
+
+        // Render agent steps as a collapsible UI
+        function renderAgentSteps(steps) {
+            if (!steps || steps.length === 0) return '';
+
+            const stepsId = 'steps-' + Date.now();
+            let stepsContent = '';
+            let toolCount = 0;
+            let thinkCount = 0;
+
+            // De-duplicate consecutive thinking steps (only show unique ones)
+            let lastThinking = '';
+
+            steps.forEach((step, i) => {
+                const toolIcons = {
+                    'web_search': 'fa-search',
+                    'web_fetch': 'fa-globe',
+                    'file_read': 'fa-file-alt',
+                    'file_write': 'fa-save',
+                    'file_create': 'fa-file-plus',
+                    'file_list': 'fa-folder-open',
+                    'file_delete': 'fa-trash',
+                    'shell_exec': 'fa-terminal',
+                    'memory_store': 'fa-database',
+                    'memory_search': 'fa-search-plus',
+                    'run_python': 'fa-python',
+                    'run_javascript': 'fa-js',
+                    'create_pdf': 'fa-file-pdf',
+                };
+
+                stepsContent += `<div class="agent-step">`;
+
+                // Show thinking (model's internal reasoning)
+                if (step.thinking && step.thinking !== lastThinking) {
+                    lastThinking = step.thinking;
+                    thinkCount++;
+                    const thinkId = stepsId + '-think-' + i;
+                    const thinkPreview = step.thinking.length > 60 ? step.thinking.substring(0, 60) + '...' : step.thinking;
+                    stepsContent += `<div class="agent-step-thinking" onclick="toggleSteps('${thinkId}')" style="cursor:pointer;">
+                        <i class="fas fa-caret-right" id="${thinkId}-icon" style="font-size:0.6rem;width:10px;"></i>
+                        <i class="fas fa-brain" style="color:#a78bfa;font-size:0.65rem;"></i>
+                        <span style="color:#a78bfa;font-size:0.7rem;">${escapeHtml(thinkPreview)}</span>
+                    </div>
+                    <div class="agent-steps-body" id="${thinkId}" style="display:none;margin-left:18px;margin-bottom:4px;">
+                        <div style="color:#c4b5fd;font-size:0.7rem;background:rgba(167,139,250,0.08);padding:6px 8px;border-radius:6px;white-space:pre-wrap;line-height:1.4;">${escapeHtml(step.thinking)}</div>
+                    </div>`;
+                }
+
+                // Show thought (ReAct style)
+                if (step.thought && !step.thinking) {
+                    stepsContent += `<div class="agent-step-thought">💭 ${escapeHtml(step.thought)}</div>`;
+                }
+
+                // Show tool call
+                if (step.action) {
+                    toolCount++;
+                    const icon = toolIcons[step.action] || 'fa-cog';
+                    stepsContent += `<div class="agent-step-action">
+                        <i class="fas ${icon}"></i>
+                        <strong>${escapeHtml(step.action)}</strong>
+                        <span style="color:#94a3b8;font-size:0.7rem;">${escapeHtml((step.action_input || '').substring(0, 100))}</span>
+                    </div>`;
+                    if (step.observation) {
+                        const obsId = stepsId + '-obs-' + i;
+                        const obsPreview = step.observation.length > 80 ? step.observation.substring(0, 80) + '...' : step.observation;
+                        stepsContent += `<div class="agent-step-obs-toggle" onclick="toggleSteps('${obsId}')" style="cursor:pointer;">
+                            <i class="fas fa-caret-right" id="${obsId}-icon" style="font-size:0.6rem;width:10px;"></i>
+                            <span style="color:#6b7280;font-size:0.7rem;">${escapeHtml(obsPreview)}</span>
+                        </div>
+                        <div class="agent-steps-body" id="${obsId}" style="display:none;margin-left:18px;">
+                            <div class="agent-step-observation">${escapeHtml(step.observation)}</div>
+                        </div>`;
+                    }
+                }
+
+                stepsContent += `</div>`;
+            });
+
+            if (toolCount === 0 && thinkCount === 0) return '';
+
+            const summary = [];
+            if (thinkCount > 0) summary.push(`${thinkCount} thinking`);
+            if (toolCount > 0) summary.push(`${toolCount} tool`);
+
+            return `<div class="agent-steps">
+                <div class="agent-steps-header" onclick="toggleSteps('${stepsId}')">
+                    <i class="fas fa-caret-right" id="${stepsId}-icon"></i>
+                    <i class="fas fa-robot"></i>
+                    Agent: ${summary.join(', ')}
+                </div>
+                <div class="agent-steps-body" id="${stepsId}">
+                    ${stepsContent}
+                </div>
+            </div>`;
+        }
+
+        // Toggle agent steps visibility
+        function toggleSteps(id) {
+            const body = document.getElementById(id);
+            const icon = document.getElementById(id + '-icon');
+            if (body) {
+                const isOpen = body.classList.toggle('open');
+                body.style.display = isOpen ? 'block' : 'none';
+                if (icon) {
+                    icon.className = isOpen ? 'fas fa-caret-down' : 'fas fa-caret-right';
+                }
+            }
+        }
+        
+        // ========== CODE EDITOR ==========
+
+        let currentCodeLang = 'python';
+        let pyodideInstance = null;
+        let pyodideLoading = false;
+        let customTools = JSON.parse(localStorage.getItem('puterra_custom_tools') || '{}');
+
+        const codeSamples = {
+            python: `# Python - runs in your browser via Pyodide (WebAssembly)
+# No server needed! Full CPython with numpy, pandas, etc.
+
+import sys
+print(f"Python {sys.version}")
+print("Hello from Puterra! 🦀")
+
+# Math example
+import math
+for i in range(5):
+    print(f"  sin({i}) = {math.sin(i):.4f}")
+
+# You can also use: numpy, pandas, matplotlib, scipy, etc.
+# Click 'pip install' to add packages
+`,
+            javascript: `// JavaScript - runs directly in your browser
+// Full access to browser APIs
+
+console.log("Hello from JavaScript! ⚡");
+
+// Array operations
+const nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const evens = nums.filter(n => n % 2 === 0);
+const sum = nums.reduce((a, b) => a + b, 0);
+console.log("Numbers:", nums.join(", "));
+console.log("Evens:", evens.join(", "));
+console.log("Sum:", sum);
+
+// Async/await works too
+const response = await fetch('/api/health');
+const data = await response.json();
+console.log("Server status:", JSON.stringify(data, null, 2));
+`,
+            wasm: `// WASM - Write JavaScript that uses WebAssembly
+// Use the built-in helpers: wasmFromBytes(), wasmFromFile()
+
+// Example: Create a WASM module from binary
+const wasmBytes = new Uint8Array([
+  0x00, 0x61, 0x73, 0x6d,  // magic: \\0asm
+  0x01, 0x00, 0x00, 0x00,  // version: 1
+  // Type section
+  0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,
+  // Function section
+  0x03, 0x02, 0x01, 0x00,
+  // Export section
+  0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00,
+  // Code section
+  0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b
+]);
+
+const instance = await wasmFromBytes(wasmBytes);
+console.log("WASM exports:", Object.keys(instance.exports));
+console.log("add(40, 2) =", instance.exports.add(40, 2));
+console.log("add(100, 200) =", instance.exports.add(100, 200));
+
+// You can also load .wasm files from your storage:
+// const inst = await wasmFromFile("mymodule.wasm");
+// console.log(inst.exports.myFunction(42));
+`
+        };
+
+        function switchCodeTab(lang) {
+            currentCodeLang = lang;
+            document.querySelectorAll('.code-tab').forEach(t => t.classList.remove('active'));
+            document.querySelector(`.code-tab.${lang}`)?.classList.add('active');
+
+            const input = document.getElementById('codeInput');
+            if (input) {
+                // Save current code
+                codeSamples['_last_' + (input.dataset.lang || 'python')] = input.value;
+                // Load new language code
+                input.value = codeSamples['_last_' + lang] || codeSamples[lang] || '';
+                input.dataset.lang = lang;
+            }
+
+            const statusEl = document.getElementById('codeLang');
+            const labels = {
+                python: 'Python (Pyodide - Browser)',
+                javascript: 'JavaScript (Browser)',
+                wasm: 'WASM/JS (Browser)',
+            };
+            if (statusEl) statusEl.textContent = labels[lang] || lang;
+        }
+
+        function handleCodeKeydown(e) {
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                const ta = e.target;
+                const start = ta.selectionStart;
+                const end = ta.selectionEnd;
+                ta.value = ta.value.substring(0, start) + '    ' + ta.value.substring(end);
+                ta.selectionStart = ta.selectionEnd = start + 4;
+            }
+            // Ctrl+Enter to run
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                runCode();
+            }
+        }
+
+        function codeLog(msg, cls = '') {
+            const output = document.getElementById('codeOutput');
+            if (!output) return;
+            const span = document.createElement('span');
+            if (cls) span.className = cls;
+            span.textContent = msg + '\n';
+            output.appendChild(span);
+            output.scrollTop = output.scrollHeight;
+        }
+
+        function clearCodeOutput() {
+            const output = document.getElementById('codeOutput');
+            if (output) output.innerHTML = '';
+        }
+
+        // ---- Pyodide (Browser Python) ----
+
+        async function initPyodide() {
+            if (pyodideInstance) return pyodideInstance;
+            if (pyodideLoading) {
+                while (pyodideLoading) await new Promise(r => setTimeout(r, 200));
+                return pyodideInstance;
+            }
+            pyodideLoading = true;
+            codeLog('Loading Python runtime (Pyodide)...', 'info');
+
+            try {
+                if (!window.loadPyodide) {
+                    const script = document.createElement('script');
+                    script.src = 'https://cdn.jsdelivr.net/pyodide/v0.27.4/full/pyodide.js';
+                    document.head.appendChild(script);
+                    await new Promise((resolve, reject) => {
+                        script.onload = resolve;
+                        script.onerror = () => reject(new Error('Failed to load Pyodide CDN'));
+                    });
+                }
+                pyodideInstance = await window.loadPyodide();
+                codeLog('Python runtime ready!', 'info');
+            } catch (e) {
+                codeLog('Failed to load Pyodide: ' + e.message, 'error');
+                pyodideLoading = false;
+                throw e;
+            }
+
+            pyodideLoading = false;
+            return pyodideInstance;
+        }
+
+        async function runPythonBrowser(code) {
+            const py = await initPyodide();
+
+            // Redirect stdout/stderr
+            py.runPython(`
+import sys, io
+sys.stdout = io.StringIO()
+sys.stderr = io.StringIO()
+`);
+            try {
+                const result = py.runPython(code);
+                const stdout = py.runPython('sys.stdout.getvalue()');
+                const stderr = py.runPython('sys.stderr.getvalue()');
+
+                if (stdout) codeLog(stdout);
+                if (stderr) codeLog(stderr, 'error');
+                if (result !== undefined && result !== null && !stdout && !stderr) {
+                    codeLog(String(result));
+                }
+                return { success: true };
+            } catch (e) {
+                codeLog(e.message, 'error');
+                return { success: false };
+            }
+        }
+
+        // ---- JavaScript (Browser) ----
+
+        async function runJSBrowser(code) {
+            // Create a sandboxed console
+            const logs = [];
+            const fakeConsole = {
+                log: (...args) => { const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a)).join(' '); logs.push(msg); codeLog(msg); },
+                error: (...args) => { const msg = args.map(a => String(a)).join(' '); logs.push(msg); codeLog(msg, 'error'); },
+                warn: (...args) => { const msg = args.map(a => String(a)).join(' '); logs.push(msg); codeLog(msg, 'info'); },
+                info: (...args) => fakeConsole.log(...args),
+                table: (data) => fakeConsole.log(JSON.stringify(data, null, 2)),
+            };
+
+            // WASM helpers
+            async function wasmFromBytes(bytes) {
+                const module = await WebAssembly.compile(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+                return await WebAssembly.instantiate(module);
+            }
+
+            async function wasmFromFile(filename) {
+                const username = currentUser?.username || 'guest';
+                const res = await fetch(`${API}/files/read`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, name: filename })
+                });
+                const data = await res.json();
+                if (!data.success) throw new Error('File not found: ' + filename);
+                // Convert base64 or raw content to bytes
+                const binary = atob(data.content);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                return wasmFromBytes(bytes);
+            }
+
+            try {
+                const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+                const fn = new AsyncFunction('console', 'fetch', 'wasmFromBytes', 'wasmFromFile', code);
+                const result = await fn(fakeConsole, fetch, wasmFromBytes, wasmFromFile);
+                if (result !== undefined && logs.length === 0) {
+                    codeLog(String(result));
+                }
+                return { success: true };
+            } catch (e) {
+                codeLog(e.message, 'error');
+                return { success: false };
+            }
+        }
+
+        // ---- Main Run ----
+
+        async function runCode() {
+            const code = document.getElementById('codeInput')?.value;
+            if (!code?.trim()) { showToast('No code to run', 'info'); return; }
+
+            clearCodeOutput();
+            const startTime = performance.now();
+            const timerEl = document.getElementById('codeTimer');
+            if (timerEl) timerEl.textContent = 'Running...';
+
+            try {
+                let result;
+                if (currentCodeLang === 'python') {
+                    result = await runPythonBrowser(code);
+                } else {
+                    // JS and WASM both run as JavaScript
+                    result = await runJSBrowser(code);
+                }
+                const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
+                if (timerEl) timerEl.textContent = `${elapsed}s`;
+            } catch (e) {
+                codeLog('Runtime error: ' + e.message, 'error');
+                if (timerEl) timerEl.textContent = 'Error';
+            }
+        }
+
+        // ---- Server-side Run ----
+
+        async function runCodeServer() {
+            const code = document.getElementById('codeInput')?.value;
+            if (!code?.trim()) { showToast('No code to run', 'info'); return; }
+
+            clearCodeOutput();
+            codeLog('Running on server...', 'system');
+            const timerEl = document.getElementById('codeTimer');
+            if (timerEl) timerEl.textContent = 'Running...';
+            const startTime = performance.now();
+            const username = currentUser?.username || 'guest';
+
+            const lang = currentCodeLang === 'wasm' ? 'javascript' : currentCodeLang;
+
+            try {
+                const res = await fetch(`${API}/run`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ language: lang, code, username })
+                });
+                const data = await res.json();
+                const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
+
+                if (data.stdout) codeLog(data.stdout);
+                if (data.stderr) codeLog(data.stderr, 'error');
+                if (data.error) codeLog(data.error, 'error');
+                if (data.hint) codeLog(data.hint, 'info');
+                if (data.success && !data.stdout && !data.stderr) codeLog('(no output)', 'system');
+
+                if (timerEl) timerEl.textContent = `${elapsed}s (server)`;
+            } catch (e) {
+                codeLog('Connection error: ' + e.message, 'error');
+                if (timerEl) timerEl.textContent = 'Error';
+            }
+        }
+
+        // ---- File Operations ----
+
+        async function saveCodeToFile() {
+            const code = document.getElementById('codeInput')?.value;
+            if (!code) return;
+            const exts = { python: '.py', javascript: '.js', wasm: '.js' };
+            const ext = exts[currentCodeLang] || '.txt';
+            const name = prompt(`Save as (filename${ext}):`, `script${ext}`);
+            if (!name) return;
+
+            const username = currentUser?.username || 'guest';
+            try {
+                const res = await fetch(`${API}/files/write`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, name, content: code })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(`Saved: ${name}`, 'success');
+                    loadFiles();
+                } else {
+                    showToast(data.error || 'Save failed', 'error');
+                }
+            } catch (e) {
+                showToast('Error: ' + e.message, 'error');
+            }
+        }
+
+        async function loadCodeFromFile() {
+            const name = prompt('File name to load:');
+            if (!name) return;
+            const username = currentUser?.username || 'guest';
+
+            try {
+                const res = await fetch(`${API}/files/read`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, name })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    const input = document.getElementById('codeInput');
+                    if (input) input.value = data.content;
+                    // Auto-detect language
+                    if (name.endsWith('.py')) switchCodeTab('python');
+                    else if (name.endsWith('.js')) switchCodeTab('javascript');
+                    else if (name.endsWith('.wasm') || name.endsWith('.wat')) switchCodeTab('wasm');
+                    showToast(`Loaded: ${name}`, 'success');
+                } else {
+                    showToast(data.error || 'File not found', 'error');
+                }
+            } catch (e) {
+                showToast('Error: ' + e.message, 'error');
+            }
+        }
+
+        // ---- Package Install (Pyodide) ----
+
+        async function installPyPackage() {
+            if (currentCodeLang !== 'python') {
+                showToast('Package install is for Python only', 'info');
+                return;
+            }
+            const pkg = prompt('Package name (e.g., numpy, pandas, requests):');
+            if (!pkg) return;
+
+            clearCodeOutput();
+            codeLog(`Installing ${pkg}...`, 'info');
+
+            try {
+                const py = await initPyodide();
+                await py.loadPackage('micropip');
+                const micropip = py.pyimport('micropip');
+                await micropip.install(pkg);
+                codeLog(`✓ ${pkg} installed successfully!`, 'info');
+            } catch (e) {
+                codeLog(`Failed to install ${pkg}: ${e.message}`, 'error');
+                codeLog('Note: Only pure Python packages are supported in browser.', 'system');
+            }
+        }
+
+        // ---- Custom Tool Registration ----
+
+        async function registerAsTool() {
+            const code = document.getElementById('codeInput')?.value;
+            if (!code?.trim()) { showToast('Write code first', 'info'); return; }
+
+            const name = prompt('Tool name (lowercase, no spaces):');
+            if (!name || !/^[a-z0-9_]+$/.test(name)) {
+                showToast('Invalid name. Use lowercase letters, numbers, underscores.', 'error');
+                return;
+            }
+            const description = prompt('Tool description:');
+            if (!description) return;
+            const inputSchema = prompt('Input JSON example (e.g., {"text": "hello"}):', '{}');
+
+            const username = currentUser?.username || 'guest';
+            const tool = {
+                name,
+                description,
+                language: currentCodeLang,
+                code,
+                input_schema: inputSchema,
+                username,
+                created_at: new Date().toISOString(),
+            };
+
+            try {
+                const res = await fetch(`${API}/tools/custom`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(tool)
+                });
+                const data = await res.json();
+                if (data.success) {
+                    customTools[name] = tool;
+                    localStorage.setItem('puterra_custom_tools', JSON.stringify(customTools));
+                    showToast(`Tool "${name}" registered!`, 'success');
+                    codeLog(`✓ Tool "${name}" registered. The AI agent can now use it.`, 'info');
+                } else {
+                    showToast(data.error || 'Registration failed', 'error');
+                }
+            } catch (e) {
+                showToast('Error: ' + e.message, 'error');
+            }
+        }
+
+        // ========== SETTINGS ==========
+
+        async function loadSettingsUI() {
+            try {
+                const res = await fetch(`${API}/settings`);
+                const data = await res.json();
+                if (data.success) {
+                    const s = data.settings;
+                    cachedSettings = s;
+                    const el = (id) => document.getElementById(id);
+                    if (el('set_llm_provider')) el('set_llm_provider').value = s.llm_provider || 'ollama';
+                    if (el('set_llm_url')) el('set_llm_url').value = s.llm_api_url || '';
+                    if (el('set_llm_model')) el('set_llm_model').value = s.llm_model || '';
+                    if (el('set_llm_key')) el('set_llm_key').value = s.llm_api_key_set ? s.llm_api_key_masked : '';
+                    if (el('set_llm_key')) el('set_llm_key').placeholder = s.llm_api_key_set ? 'Key is set (type to change)' : 'Leave empty if not required';
+                    if (el('set_max_iterations')) el('set_max_iterations').value = s.max_agent_iterations || 6;
+                    if (el('set_search_engine')) el('set_search_engine').value = s.search_engine || 'duckduckgo';
+                    if (el('set_shell_enabled')) {
+                        el('set_shell_enabled').checked = s.shell_enabled !== false;
+                        updateToggle(el('set_shell_enabled'));
+                    }
+                    if (el('set_admin_pw')) el('set_admin_pw').value = '';
+                }
+            } catch (e) {
+                showToast('Failed to load settings', 'error');
+            }
+        }
+
+        function updateToggle(checkbox) {
+            const slider = checkbox.nextElementSibling;
+            if (slider) {
+                slider.style.background = checkbox.checked ? 'rgba(34,197,94,0.6)' : 'rgba(255,255,255,0.1)';
+                // Add dot indicator
+                slider.innerHTML = `<span style="position:absolute;top:3px;${checkbox.checked ? 'right:3px' : 'left:3px'};width:18px;height:18px;background:#fff;border-radius:50%;transition:0.2s;"></span>`;
+            }
+        }
+
+        // Add toggle event listener via delegation
+        document.addEventListener('change', (e) => {
+            if (e.target.id === 'set_shell_enabled') {
+                updateToggle(e.target);
+            }
+        });
+
+        async function saveSettings() {
+            const el = (id) => document.getElementById(id);
+            const payload = {
+                llm_provider: el('set_llm_provider')?.value,
+                llm_api_url: el('set_llm_url')?.value,
+                llm_model: el('set_llm_model')?.value,
+                max_agent_iterations: parseInt(el('set_max_iterations')?.value) || 6,
+                search_engine: el('set_search_engine')?.value,
+                shell_enabled: el('set_shell_enabled')?.checked ?? true,
+            };
+
+            // Only send API key if user typed a new one (not the masked value)
+            const keyVal = el('set_llm_key')?.value || '';
+            if (keyVal && !keyVal.includes('••')) {
+                payload.llm_api_key = keyVal;
+            }
+
+            // Only send admin password if user typed one
+            const pwVal = el('set_admin_pw')?.value || '';
+            if (pwVal) {
+                payload.admin_password = pwVal;
+            }
+
+            try {
+                const res = await fetch(`${API}/settings`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('Settings saved!', 'success');
+                } else {
+                    showToast(data.error || 'Save failed', 'error');
+                }
+            } catch (e) {
+                showToast('Connection error', 'error');
+            }
+        }
+
+        async function testLLM() {
+            const resultDiv = document.getElementById('llmTestResult');
+            if (!resultDiv) return;
+            resultDiv.style.display = 'block';
+            resultDiv.style.background = 'rgba(99,102,241,0.1)';
+            resultDiv.style.color = '#a5b4fc';
+            resultDiv.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing connection...';
+
+            // Save settings first so the test uses current values
+            await saveSettings();
+
+            try {
+                const res = await fetch(`${API}/settings/test_llm`, { method: 'POST' });
+                const data = await res.json();
+
+                if (data.success) {
+                    resultDiv.style.background = 'rgba(34,197,94,0.1)';
+                    resultDiv.style.color = '#86efac';
+                    resultDiv.innerHTML = '<i class="fas fa-check-circle"></i> Connection OK! Response: ' + escapeHtml((data.response || '').substring(0, 100));
+                } else {
+                    resultDiv.style.background = 'rgba(239,68,68,0.1)';
+                    resultDiv.style.color = '#fca5a5';
+                    resultDiv.innerHTML = '<i class="fas fa-times-circle"></i> Failed: ' + escapeHtml((data.response || 'Connection error').substring(0, 200));
+                }
+            } catch (e) {
+                resultDiv.style.background = 'rgba(239,68,68,0.1)';
+                resultDiv.style.color = '#fca5a5';
+                resultDiv.innerHTML = '<i class="fas fa-times-circle"></i> Error: ' + e.message;
+            }
+        }
+
+        // Terminal
+        async function executeCommand() {
+            const input = document.getElementById('terminalInput');
+            const command = input.value.trim();
+            if (!command) return;
+            
+            const output = document.getElementById('terminalOutput');
+            output.innerHTML += `<div class="terminal-line"><span class="terminal-prompt">$</span> ${escapeHtml(command)}</div>`;
+            input.value = '';
+            
+            // Check for built-in commands
+            if (command === 'help') {
+                output.innerHTML += `<div class="terminal-line terminal-info">Available commands:
+  help     - Show this help
+  clear    - Clear terminal
+  tools    - List available tools
+  web      - Web search
+  fetch    - Fetch URL
+  shell    - Execute shell command
+  memory   - Memory operations</div>`;
+                output.scrollTop = output.scrollHeight;
+                return;
+            }
+            
+            if (command === 'clear') {
+                output.innerHTML = '';
+                return;
+            }
+            
+            if (command === 'tools') {
+                try {
+                    const res = await fetch(`${API}/tools`);
+                    const data = await res.json();
+                    if (data.success) {
+                        output.innerHTML += `<div class="terminal-line terminal-info">Available tools:</div>`;
+                        data.tools.forEach(t => {
+                            output.innerHTML += `<div class="terminal-line">  ${t.name} - ${t.description}</div>`;
+                        });
+                    }
+                } catch (e) {
+                    output.innerHTML += `<div class="terminal-line terminal-error">Error: ${e.message}</div>`;
+                }
+                output.scrollTop = output.scrollHeight;
+                return;
+            }
+            
+            // Send to API
+            try {
+                const res = await fetch(`${API}/shell`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ command })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    if (data.stdout) output.innerHTML += `<div class="terminal-line">${escapeHtml(data.stdout)}</div>`;
+                    if (data.stderr) output.innerHTML += `<div class="terminal-line terminal-error">${escapeHtml(data.stderr)}</div>`;
+                } else {
+                    output.innerHTML += `<div class="terminal-line terminal-error">Error: ${data.error || 'Command failed'}</div>`;
+                }
+            } catch (e) {
+                output.innerHTML += `<div class="terminal-line terminal-error">Error: ${e.message}</div>`;
+            }
+            
+            output.scrollTop = output.scrollHeight;
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Create window
+        function createWindow(id, title, content, width = 500, height = 400) {
+            const container = document.getElementById('windowsContainer');
+            const win = document.createElement('div');
+            win.id = `window-${id}`;
+            win.className = 'window fade-in';
+            win.style.width = `${width}px`;
+            win.style.height = `${height}px`;
+            win.style.left = `${(window.innerWidth - width) / 2}px`;
+            win.style.top = `${(window.innerHeight - height) / 2 - 30}px`;
+            win.style.zIndex = ++windowZIndex;
+            
+            win.innerHTML = `
+                <div class="window-header">
+                    <div class="window-title">
+                        <span>${title}</span>
+                    </div>
+                    <div class="window-controls">
+                        <button class="window-btn minimize" onclick="minimizeWindow('${id}')"></button>
+                        <button class="window-btn maximize" onclick="maximizeWindow('${id}')"></button>
+                        <button class="window-btn close" onclick="closeWindow('${id}')"></button>
+                    </div>
+                </div>
+                <div class="window-content">${content}</div>
+                <div class="window-resize-handle"></div>
+            `;
+            
+            container.appendChild(win);
+            openWindows[id] = true;
+            makeDraggable(win);
+            makeResizable(win);
+        }
+        
+        // Window controls
+        function closeWindow(id) {
+            const win = document.getElementById(`window-${id}`);
+            if (win) win.remove();
+            document.getElementById(`taskbar-${id}`)?.classList.remove('active');
+            delete openWindows[id];
+        }
+        
+        function minimizeWindow(id) {
+            const win = document.getElementById(`window-${id}`);
+            if (win) win.classList.toggle('minimized');
+        }
+        
+        function maximizeWindow(id) {
+            const win = document.getElementById(`window-${id}`);
+            if (win) {
+                if (win.style.width === '100%') {
+                    win.style.width = '500px';
+                    win.style.height = '400px';
+                    win.style.left = `${(window.innerWidth - 500) / 2}px`;
+                    win.style.top = `${(window.innerHeight - 400) / 2 - 30}px`;
+                } else {
+                    win.style.width = '100%';
+                    win.style.height = 'calc(100vh - 50px)';
+                    win.style.left = '0';
+                    win.style.top = '0';
+                }
+            }
+        }
+        
+        // Make window draggable (mouse + touch)
+        function makeDraggable(win) {
+            const header = win.querySelector('.window-header');
+            let isDragging = false;
+            let offsetX, offsetY;
+            
+            // Mouse events
+            header.addEventListener('mousedown', (e) => {
+                if (e.target.classList.contains('window-btn')) return;
+                isDragging = true;
+                offsetX = e.clientX - win.offsetLeft;
+                offsetY = e.clientY - win.offsetTop;
+                win.style.zIndex = ++windowZIndex;
+                e.preventDefault();
+            });
+            
+            document.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+                win.style.left = `${e.clientX - offsetX}px`;
+                win.style.top = `${e.clientY - offsetY}px`;
+            });
+            
+            document.addEventListener('mouseup', () => { isDragging = false; });
+            
+            // Touch events for mobile
+            header.addEventListener('touchstart', (e) => {
+                if (e.target.classList.contains('window-btn')) return;
+                isDragging = true;
+                const touch = e.touches[0];
+                offsetX = touch.clientX - win.offsetLeft;
+                offsetY = touch.clientY - win.offsetTop;
+                win.style.zIndex = ++windowZIndex;
+                e.preventDefault();
+            }, { passive: false });
+            
+            document.addEventListener('touchmove', (e) => {
+                if (!isDragging) return;
+                const touch = e.touches[0];
+                win.style.left = `${touch.clientX - offsetX}px`;
+                win.style.top = `${touch.clientY - offsetY}px`;
+            }, { passive: false });
+            
+            document.addEventListener('touchend', () => { isDragging = false; });
+        }
+        
+        // Make window resizable
+        function makeResizable(win) {
+            const handle = win.querySelector('.window-resize-handle');
+            if (!handle) return;
+            
+            let isResizing = false;
+            let startX, startY, startW, startH;
+            
+            handle.addEventListener('mousedown', (e) => {
+                isResizing = true;
+                startX = e.clientX;
+                startY = e.clientY;
+                startW = win.offsetWidth;
+                startH = win.offsetHeight;
+                e.preventDefault();
+                e.stopPropagation();
+            });
+            
+            document.addEventListener('mousemove', (e) => {
+                if (!isResizing) return;
+                const newW = startW + (e.clientX - startX);
+                const newH = startH + (e.clientY - startY);
+                if (newW >= 300) win.style.width = `${newW}px`;
+                if (newH >= 200) win.style.height = `${newH}px`;
+            });
+            
+            document.addEventListener('mouseup', () => { isResizing = false; });
+            
+            // Touch support for resizing
+            handle.addEventListener('touchstart', (e) => {
+                isResizing = true;
+                const touch = e.touches[0];
+                startX = touch.clientX;
+                startY = touch.clientY;
+                startW = win.offsetWidth;
+                startH = win.offsetHeight;
+                e.preventDefault();
+                e.stopPropagation();
+            }, { passive: false });
+            
+            document.addEventListener('touchmove', (e) => {
+                if (!isResizing) return;
+                const touch = e.touches[0];
+                const newW = startW + (touch.clientX - startX);
+                const newH = startH + (touch.clientY - startY);
+                if (newW >= 300) win.style.width = `${newW}px`;
+                if (newH >= 200) win.style.height = `${newH}px`;
+            }, { passive: false });
+            
+            document.addEventListener('touchend', () => { isResizing = false; });
+        }
+        
+        // Open file
+        async function openFile(name, isDir) {
+            if (isDir) {
+                showToast(`Opening folder: ${name}`, 'info');
+                // TODO: Navigate into folder
+            } else {
+                const ext = name.split('.').pop().toLowerCase();
+                const binaryExts = ['pdf', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'zip', 'tar', 'gz', 'mp3', 'mp4', 'wav', 'ogg'];
+                if (binaryExts.includes(ext)) {
+                    downloadOrViewFile(name, ext);
+                } else {
+                    openFileEditor(name);
+                }
+            }
+        }
+
+        // Download or view binary files (PDF, images, etc.)
+        async function downloadOrViewFile(name, ext) {
+            const username = currentUser?.username || 'guest';
+            const url = `${API}/files/download/${username}/${encodeURIComponent(name)}`;
+
+            if (ext === 'pdf') {
+                // Open PDF in a new browser tab
+                window.open(url, '_blank');
+            } else if (['png','jpg','jpeg','gif','bmp','webp'].includes(ext)) {
+                // Show image in a window
+                const viewerId = `viewer-${name.replace(/[^a-z0-9]/gi, '-')}`;
+                createWindow(viewerId, `🖼️ ${name}`, `
+                    <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;">
+                        <img src="${url}" style="max-width:100%;max-height:calc(100% - 50px);object-fit:contain;border-radius:8px;" />
+                        <div style="margin-top:10px;">
+                            <a href="${url}" download="${name}" style="color:#60a5fa;text-decoration:none;">⬇️ Download</a>
+                        </div>
+                    </div>
+                `, 700, 500);
+            } else {
+                // Download other binary files
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = name;
+                a.click();
+            }
+        }
+        
+        // File Editor Window
+        async function openFileEditor(name) {
+            const username = currentUser?.username || 'guest';
+            try {
+                const res = await fetch(`${API}/files/read`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, name })
+                });
+                const data = await res.json();
+                
+                const content = data.success ? data.content : '';
+                const editorId = `editor-${name.replace(/[^a-z0-9]/gi, '-')}`;
+                
+                // Check if window already exists
+                const existing = document.getElementById(`window-${editorId}`);
+                if (existing) {
+                    existing.style.zIndex = ++windowZIndex;
+                    existing.classList.remove('minimized');
+                    return;
+                }
+                
+                createWindow(editorId, `📄 ${name}`, `
+                    <div style="height:100%;display:flex;flex-direction:column;">
+                        <textarea id="file-content-${editorId}" style="
+                            flex:1;
+                            background:#000;
+                            border:1px solid rgba(255,255,255,0.1);
+                            border-radius:8px;
+                            padding:12px;
+                            color:#fff;
+                            font-family:'JetBrains Mono',monospace;
+                            font-size:13px;
+                            resize:none;
+                            outline:none;
+                        ">${escapeHtml(content)}</textarea>
+                        <div style="margin-top:10px;display:flex;gap:8px;">
+                            <button onclick="saveFileContent('${name}', '${editorId}')" style="
+                                background:linear-gradient(135deg,#22c55e,#16a34a);
+                                border:none;
+                                border-radius:6px;
+                                padding:8px 16px;
+                                color:#fff;
+                                cursor:pointer;
+                                font-weight:500;
+                            ">💾 Save</button>
+                            <button onclick="closeWindow('${editorId}')" style="
+                                background:rgba(239,68,68,0.2);
+                                border:1px solid rgba(239,68,68,0.3);
+                                border-radius:6px;
+                                padding:8px 16px;
+                                color:#ef4444;
+                                cursor:pointer;
+                            ">Cancel</button>
+                        </div>
+                    </div>
+                `, 600, 450);
+            } catch (e) {
+                showToast('Failed to open file', 'error');
+            }
+        }
+        
+        // Save file content
+        async function saveFileContent(name, editorId) {
+            const textarea = document.getElementById(`file-content-${editorId}`);
+            if (!textarea) return;
+            const username = currentUser?.username || 'guest';
+            const content = textarea.value;
+            
+            try {
+                const res = await fetch(`${API}/files/write`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, name, content })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    showToast(`Saved: ${name}`, 'success');
+                } else {
+                    showToast(data.error || 'Save failed', 'error');
+                }
+            } catch (e) {
+                showToast('Connection error', 'error');
+            }
+        }
+        
+        // Context menu
+        document.addEventListener('contextmenu', (e) => {
+            if (document.getElementById('desktopScreen').classList.contains('hidden')) return;
+            e.preventDefault();
+            
+            const menu = document.getElementById('contextMenu');
+            const renameItem = document.getElementById('renameMenuItem');
+            const deleteItem = document.getElementById('deleteMenuItem');
+            
+            // Show/hide rename/delete based on selection
+            if (selectedItems.length === 1) {
+                renameItem.style.display = 'flex';
+                deleteItem.style.display = 'flex';
+            } else if (selectedItems.length > 1) {
+                renameItem.style.display = 'none';
+                deleteItem.style.display = 'flex';
+            } else {
+                renameItem.style.display = 'none';
+                deleteItem.style.display = 'none';
+            }
+            
+            menu.style.left = `${Math.min(e.pageX, window.innerWidth - 170)}px`;
+            menu.style.top = `${Math.min(e.pageY, window.innerHeight - 200)}px`;
+            menu.classList.remove('hidden');
+        });
+        
+        document.addEventListener('click', hideContextMenu);
+        
+        function hideContextMenu() {
+            document.getElementById('contextMenu').classList.add('hidden');
+        }
+        
+        // Rename selected item
+        async function renameSelected() {
+            if (selectedItems.length !== 1) {
+                showToast('Select one item to rename', 'info');
+                return;
+            }
+            await renameItem(selectedItems[0]);
+            hideContextMenu();
+        }
+        
+        // Create new folder
+        async function createNewFolder() {
+            const name = prompt('Folder name:');
+            if (!name) { hideContextMenu(); return; }
+            const username = currentUser?.username || 'guest';
+            
+            try {
+                const res = await fetch(`${API}/files/create`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, name, type: 'folder' })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    showToast(`Created folder: ${name}`, 'success');
+                    loadFiles();
+                } else {
+                    showToast(data.error || 'Failed to create folder', 'error');
+                }
+            } catch (e) {
+                showToast('Connection error', 'error');
+            }
+            hideContextMenu();
+        }
+        
+        // Create new file
+        async function createNewFile() {
+            const name = prompt('File name (e.g., notes.txt):');
+            if (!name) { hideContextMenu(); return; }
+            const username = currentUser?.username || 'guest';
+            
+            try {
+                const res = await fetch(`${API}/files/create`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, name, type: 'file' })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    showToast(`Created file: ${name}`, 'success');
+                    loadFiles();
+                } else {
+                    showToast(data.error || 'Failed to create file', 'error');
+                }
+            } catch (e) {
+                showToast('Connection error', 'error');
+            }
+            hideContextMenu();
+        }
+        
+        // Upload file (TODO: needs backend multipart support)
+        function uploadFile() {
+            hideContextMenu();
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.multiple = true;
+            input.onchange = async () => {
+                if (!input.files || input.files.length === 0) return;
+                const username = currentUser?.username || 'guest';
+                const formData = new FormData();
+                for (const file of input.files) {
+                    formData.append('files', file, file.name);
+                }
+                try {
+                    showToast(`Uploading ${input.files.length} file(s)...`, 'info');
+                    const res = await fetch(`${API}/files/upload/${username}`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        showToast(`Uploaded ${data.count} file(s)`, 'success');
+                        loadFiles();
+                    } else {
+                        showToast(data.error || 'Upload failed', 'error');
+                    }
+                } catch (e) {
+                    showToast('Upload failed: ' + e.message, 'error');
+                }
+            };
+            input.click();
+        }
+        
+        // Download selected files
+        function downloadSelected() {
+            hideContextMenu();
+            if (selectedItems.length === 0) {
+                showToast('Select files to download', 'info');
+                return;
+            }
+            const username = currentUser?.username || 'guest';
+            selectedItems.forEach(i => {
+                const file = files[i];
+                if (file.is_dir) return; // skip folders
+                const url = `${API}/files/download/${username}/${encodeURIComponent(file.name)}`;
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = file.name;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            });
+            showToast(`Downloading ${selectedItems.length} file(s)`, 'success');
+        }
+
+        // Delete selected items
+        async function deleteSelected() {
+            if (selectedItems.length === 0) {
+                showToast('Select items to delete', 'info');
+                return;
+            }
+            const username = currentUser?.username || 'guest';
+            const names = selectedItems.map(i => files[i].name).join(', ');
+            if (!confirm(`Delete: ${names}?`)) return;
+            
+            try {
+                const res = await fetch(`${API}/files/delete`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, names: selectedItems.map(i => files[i].name) })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    showToast('Deleted successfully', 'success');
+                    selectedItems = [];
+                    loadFiles();
+                } else {
+                    showToast(data.error || 'Delete failed', 'error');
+                }
+            } catch (e) {
+                showToast('Connection error', 'error');
+            }
+        }
+        
+        // Rename item
+        async function renameItem(index) {
+            const file = files[index];
+            const newName = prompt('New name:', file.name);
+            if (!newName || newName === file.name) return;
+            const username = currentUser?.username || 'guest';
+            
+            try {
+                const res = await fetch(`${API}/files/rename`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, old_name: file.name, new_name: newName })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    showToast('Renamed successfully', 'success');
+                    loadFiles();
+                } else {
+                    showToast(data.error || 'Rename failed', 'error');
+                }
+            } catch (e) {
+                showToast('Connection error', 'error');
+            }
+        }
+        
+        // Refresh
+        function refresh() {
+            loadFiles();
+            hideContextMenu();
+            showToast('Refreshed', 'info');
+        }
+        
+        // Enter key
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('password').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') login();
+            });
+            document.getElementById('newPassword').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') signup();
+            });
+            
+            // Check for saved session, require login if none
+            checkSession();
+            // Pre-load settings for model name etc.
+            fetch(`${API}/settings`).then(r => r.json()).then(d => { if (d.success) cachedSettings = d.settings; }).catch(() => {});
+        });
+    </script>
+</body>
+</html>

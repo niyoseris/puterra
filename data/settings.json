@@ -1,0 +1,10 @@
+{
+  "llm_api_url": "https://ollama.com/api",
+  "llm_model": "glm-5:cloud",
+  "llm_api_key": "cf95dacb79334f5ea8d5c385598d3c88.sYLcIF916T8Qi7P2f6t8Ln6E",
+  "llm_provider": "ollama",
+  "search_engine": "ollama",
+  "max_agent_iterations": 12,
+  "shell_enabled": true,
+  "admin_password": "puterra2026"
+}

@@ -1,0 +1,1986 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+    <title>Puterra - Cloud OS with AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+        
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        
+        .desktop-bg {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: 
+                radial-gradient(ellipse at top left, rgba(99, 102, 241, 0.15) 0%, transparent 50%),
+                radial-gradient(ellipse at bottom right, rgba(168, 85, 247, 0.15) 0%, transparent 50%),
+                linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+            z-index: -1;
+        }
+        
+        .glass {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .login-card {
+            background: rgba(255, 255, 255, 0.08);
+            backdrop-filter: blur(40px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            transition: all 0.2s ease;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 40px rgba(99, 102, 241, 0.4);
+        }
+        
+        .input-field {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: all 0.2s ease;
+        }
+        
+        .input-field:focus {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(99, 102, 241, 0.5);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+        }
+        
+        .desktop-icon {
+            width: 80px;
+            padding: 12px;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: background 0.15s ease, transform 0.15s ease;
+            text-align: center;
+            user-select: none;
+        }
+        
+        .desktop-icon:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        .desktop-icon.selected {
+            background: rgba(99, 102, 241, 0.3);
+            border: 1px solid rgba(99, 102, 241, 0.5);
+        }
+        
+        .desktop-icon i {
+            font-size: 2.5rem;
+            margin-bottom: 8px;
+            display: block;
+        }
+        
+        .desktop-icon span {
+            font-size: 0.7rem;
+            display: block;
+            word-break: break-word;
+            line-height: 1.2;
+        }
+        
+        .window {
+            position: absolute;
+            background: rgba(30, 30, 40, 0.98);
+            backdrop-filter: blur(20px);
+            border-radius: 12px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            min-width: 300px;
+            min-height: 200px;
+            display: flex;
+            flex-direction: column;
+            resize: both;
+            overflow: hidden;
+        }
+        
+        .window-resize-handle {
+            position: absolute;
+            bottom: 0;
+            right: 0;
+            width: 16px;
+            height: 16px;
+            cursor: se-resize;
+            background: linear-gradient(135deg, transparent 50%, rgba(255,255,255,0.2) 50%);
+            border-radius: 0 0 12px 0;
+        }
+        
+        .window.minimized { display: none; }
+        
+        .window-header {
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.2) 0%, rgba(139, 92, 246, 0.2) 100%);
+            padding: 12px 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            cursor: move;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 12px 12px 0 0;
+        }
+        
+        .window-title {
+            font-weight: 600;
+            font-size: 0.875rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .window-controls { display: flex; gap: 8px; }
+        
+        .window-btn {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: transform 0.2s;
+            border: none;
+        }
+        
+        .window-btn:hover { transform: scale(1.2); }
+        .window-btn.close { background: #ef4444; }
+        .window-btn.minimize { background: #f59e0b; }
+        .window-btn.maximize { background: #22c55e; }
+        
+        .window-content {
+            padding: 16px;
+            overflow: auto;
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .window-content > * {
+            flex: 1;
+            min-height: 0;
+        }
+        
+        .taskbar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 50px;
+            background: rgba(20, 20, 30, 0.95);
+            backdrop-filter: blur(20px);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            padding: 0 16px;
+            z-index: 1000;
+        }
+        
+        .taskbar-item {
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.15s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.8rem;
+            background: transparent;
+            border: none;
+            color: white;
+        }
+        
+        .taskbar-item:hover { background: rgba(255, 255, 255, 0.1); }
+        .taskbar-item.active { background: rgba(99, 102, 241, 0.3); border-bottom: 2px solid #6366f1; }
+        
+        .context-menu {
+            position: fixed;
+            background: rgba(30, 30, 40, 0.98);
+            backdrop-filter: blur(20px);
+            border-radius: 8px;
+            padding: 6px 0;
+            min-width: 160px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+            z-index: 2000;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .context-menu-item {
+            padding: 8px 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.8rem;
+            transition: background 0.15s;
+        }
+        
+        .context-menu-item:hover { background: rgba(99, 102, 241, 0.2); }
+        
+        .toast {
+            position: fixed;
+            bottom: 70px;
+            right: 20px;
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            z-index: 3000;
+            animation: slideIn 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        
+        .toast.success { background: rgba(34, 197, 94, 0.95); }
+        .toast.error { background: rgba(239, 68, 68, 0.95); }
+        .toast.info { background: rgba(99, 102, 241, 0.95); }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        
+        .fade-in { animation: fadeIn 0.2s ease; }
+        
+        /* AI Chat */
+        .chat-container {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            min-height: 200px;
+        }
+        
+        .chat-messages {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .chat-message {
+            padding: 10px 14px;
+            border-radius: 12px;
+            max-width: 85%;
+            font-size: 0.85rem;
+            line-height: 1.4;
+            word-wrap: break-word;
+        }
+        
+        .chat-message.user {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            align-self: flex-end;
+        }
+        
+        .chat-message.assistant {
+            background: rgba(255, 255, 255, 0.1);
+            align-self: flex-start;
+        }
+        
+        .chat-input-area {
+            display: flex;
+            gap: 10px;
+            padding: 10px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            flex-shrink: 0;
+        }
+        
+        .chat-input {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 10px;
+            color: white;
+            outline: none;
+            font-family: inherit;
+            min-width: 0;
+        }
+        
+        .chat-send {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            border: none;
+            border-radius: 8px;
+            padding: 10px 16px;
+            color: white;
+            cursor: pointer;
+            font-weight: 500;
+            white-space: nowrap;
+        }
+        
+        .chat-send:hover { opacity: 0.9; }
+        
+        /* Terminal */
+        .terminal {
+            background: #000;
+            border-radius: 8px;
+            padding: 10px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            height: 100%;
+            min-height: 150px;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .terminal-output {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        
+        .terminal-line { margin-bottom: 2px; }
+        .terminal-prompt { color: #22c55e; }
+        .terminal-error { color: #ef4444; }
+        .terminal-success { color: #22c55e; }
+        .terminal-info { color: #6366f1; }
+        
+        .terminal-input-line {
+            display: flex;
+            align-items: center;
+            margin-top: 5px;
+            flex-shrink: 0;
+        }
+        
+        .terminal-input {
+            background: transparent;
+            border: none;
+            color: white;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            outline: none;
+            flex: 1;
+            min-width: 0;
+        }
+        
+        @media (max-width: 768px) {
+            .desktop-icon { width: 65px; padding: 8px; }
+            .desktop-icon i { font-size: 1.8rem; }
+            .desktop-icon span { font-size: 0.65rem; }
+            .window { min-width: 95% !important; width: 95% !important; }
+            .taskbar { height: 45px; }
+            .taskbar-item { padding: 6px 10px; font-size: 0.75rem; }
+        }
+        
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.05); }
+        ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.3); }
+        
+        /* File Grid */
+        .file-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+            gap: 10px;
+            padding: 10px;
+        }
+        
+        .file-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 12px 8px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.15s;
+            text-align: center;
+        }
+        
+        .file-item:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        .file-item.selected {
+            background: rgba(99, 102, 241, 0.3);
+            border: 1px solid rgba(99, 102, 241, 0.5);
+        }
+        
+        .file-item i {
+            font-size: 2rem;
+            margin-bottom: 6px;
+        }
+        
+        .file-item span {
+            font-size: 0.7rem;
+            word-break: break-word;
+            line-height: 1.2;
+            max-width: 70px;
+        }
+        
+        /* Context menu for file items */
+        .file-actions {
+            display: flex;
+            gap: 4px;
+            margin-top: 6px;
+            opacity: 0;
+            transition: opacity 0.15s;
+        }
+        
+        .file-item:hover .file-actions {
+            opacity: 1;
+        }
+        
+        .file-action-btn {
+            background: rgba(255,255,255,0.1);
+            border: none;
+            border-radius: 4px;
+            padding: 4px 6px;
+            cursor: pointer;
+            color: white;
+            font-size: 0.65rem;
+        }
+        
+        .file-action-btn:hover {
+            background: rgba(255,255,255,0.2);
+        }
+        
+        .file-action-btn.delete {
+            color: #ef4444;
+        }
+    </style>
+</head>
+<body class="text-white overflow-hidden">
+    <!-- Login Screen -->
+    <div id="loginScreen" class="min-h-screen flex items-center justify-center p-4">
+        <div class="desktop-bg"></div>
+        
+        <div class="login-card rounded-2xl p-8 w-full max-w-md fade-in">
+            <div class="text-center mb-8">
+                <div class="text-6xl mb-4">🦀</div>
+                <h1 class="text-3xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">Puterra</h1>
+                <p class="text-gray-400 mt-2">Cloud OS with AI</p>
+            </div>
+            
+            <div id="loginForm">
+                <div class="mb-4">
+                    <label class="block text-sm font-medium mb-2 text-gray-300">
+                        <i class="fas fa-user mr-2"></i>Username
+                    </label>
+                    <input type="text" id="username" 
+                           class="input-field w-full px-4 py-3 rounded-xl outline-none text-white"
+                           placeholder="Enter username" autocomplete="username">
+                </div>
+                <div class="mb-6">
+                    <label class="block text-sm font-medium mb-2 text-gray-300">
+                        <i class="fas fa-lock mr-2"></i>Password
+                    </label>
+                    <input type="password" id="password" 
+                           class="input-field w-full px-4 py-3 rounded-xl outline-none text-white"
+                           placeholder="Enter password" autocomplete="current-password">
+                </div>
+                <button onclick="login()" class="btn-primary w-full py-3 rounded-xl font-semibold text-white flex items-center justify-center gap-2">
+                    <i class="fas fa-sign-in-alt"></i>
+                    <span>Login</span>
+                </button>
+                <p class="text-center mt-6 text-gray-400">
+                    Don't have an account? 
+                    <button onclick="showSignup()" class="text-purple-400 hover:text-purple-300 font-medium">Sign Up</button>
+                </p>
+            </div>
+            
+            <div id="signupForm" class="hidden">
+                <div class="mb-4">
+                    <label class="block text-sm font-medium mb-2 text-gray-300">
+                        <i class="fas fa-user mr-2"></i>Username
+                    </label>
+                    <input type="text" id="newUsername" 
+                           class="input-field w-full px-4 py-3 rounded-xl outline-none text-white"
+                           placeholder="Choose username">
+                </div>
+                <div class="mb-6">
+                    <label class="block text-sm font-medium mb-2 text-gray-300">
+                        <i class="fas fa-lock mr-2"></i>Password
+                    </label>
+                    <input type="password" id="newPassword" 
+                           class="input-field w-full px-4 py-3 rounded-xl outline-none text-white"
+                           placeholder="Create password">
+                </div>
+                <button onclick="signup()" class="btn-primary w-full py-3 rounded-xl font-semibold text-white flex items-center justify-center gap-2">
+                    <i class="fas fa-user-plus"></i>
+                    <span>Create Account</span>
+                </button>
+                <p class="text-center mt-6 text-gray-400">
+                    Already have an account? 
+                    <button onclick="showLogin()" class="text-purple-400 hover:text-purple-300 font-medium">Login</button>
+                </p>
+            </div>
+            
+            <div id="errorMsg" class="hidden mt-4 p-3 rounded-xl bg-red-500/20 text-red-300 text-center text-sm"></div>
+            <div id="successMsg" class="hidden mt-4 p-3 rounded-xl bg-green-500/20 text-green-300 text-center text-sm"></div>
+        </div>
+    </div>
+    
+    <!-- Desktop -->
+    <div id="desktopScreen" class="hidden min-h-screen">
+        <div class="desktop-bg"></div>
+        
+        <div id="desktopArea" class="p-6 pb-16" style="height: calc(100vh - 50px); overflow-y: auto;">
+            <div id="desktopIcons" class="flex flex-wrap gap-3"></div>
+        </div>
+        
+        <div class="taskbar">
+            <button onclick="openApp('files')" class="taskbar-item" id="taskbar-files">
+                <i class="fas fa-folder"></i>
+                <span class="hidden sm:inline">Files</span>
+            </button>
+            <button onclick="openApp('ai')" class="taskbar-item" id="taskbar-ai">
+                <i class="fas fa-robot"></i>
+                <span class="hidden sm:inline">AI</span>
+            </button>
+            <button onclick="openApp('terminal')" class="taskbar-item" id="taskbar-terminal">
+                <i class="fas fa-terminal"></i>
+                <span class="hidden sm:inline">Terminal</span>
+            </button>
+            <button onclick="openApp('settings')" class="taskbar-item" id="taskbar-settings">
+                <i class="fas fa-cog"></i>
+                <span class="hidden sm:inline">Settings</span>
+            </button>
+            
+            <div class="flex items-center gap-3 ml-auto">
+                <span id="userDisplay" class="text-sm text-gray-400 hidden sm:inline"></span>
+                <button onclick="logout()" class="taskbar-item text-red-400 hover:text-red-300">
+                    <i class="fas fa-sign-out-alt"></i>
+                </button>
+            </div>
+        </div>
+        
+        <div id="windowsContainer"></div>
+        
+        <div id="contextMenu" class="context-menu hidden">
+            <div class="context-menu-item" onclick="createNewFolder()">
+                <i class="fas fa-folder-plus"></i>
+                <span>New Folder</span>
+            </div>
+            <div class="context-menu-item" onclick="createNewFile()">
+                <i class="fas fa-file-plus"></i>
+                <span>New File</span>
+            </div>
+            <div class="context-menu-item" onclick="uploadFile()">
+                <i class="fas fa-upload"></i>
+                <span>Upload</span>
+            </div>
+            <div class="context-menu-divider" style="height:1px;background:rgba(255,255,255,0.1);margin:4px 0;"></div>
+            <div class="context-menu-item" onclick="renameSelected()" id="renameMenuItem">
+                <i class="fas fa-edit"></i>
+                <span>Rename</span>
+            </div>
+            <div class="context-menu-item" onclick="deleteSelected()" style="color:#ef4444;" id="deleteMenuItem">
+                <i class="fas fa-trash"></i>
+                <span>Delete</span>
+            </div>
+            <div class="context-menu-divider" style="height:1px;background:rgba(255,255,255,0.1);margin:4px 0;"></div>
+            <div class="context-menu-item" onclick="refresh()">
+                <i class="fas fa-sync"></i>
+                <span>Refresh</span>
+            </div>
+        </div>
+        
+        <div id="toastContainer"></div>
+    </div>
+    
+    <script>
+        const API = '/api';
+        let currentUser = null;
+        let files = [];
+        let selectedItems = [];
+        let openWindows = {};
+        let windowZIndex = 100;
+        let chatHistory = [];
+        
+        // Toast
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.innerHTML = `<i class="fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle'}"></i>${message}`;
+            container.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+        
+        // Show/hide forms
+        function showSignup() {
+            document.getElementById('loginForm').classList.add('hidden');
+            document.getElementById('signupForm').classList.remove('hidden');
+            document.getElementById('errorMsg').classList.add('hidden');
+            document.getElementById('successMsg').classList.add('hidden');
+        }
+        
+        function showLogin() {
+            document.getElementById('signupForm').classList.add('hidden');
+            document.getElementById('loginForm').classList.remove('hidden');
+            document.getElementById('errorMsg').classList.add('hidden');
+            document.getElementById('successMsg').classList.add('hidden');
+        }
+        
+        function showError(msg) {
+            const el = document.getElementById('errorMsg');
+            el.textContent = msg;
+            el.classList.remove('hidden');
+            setTimeout(() => el.classList.add('hidden'), 3000);
+        }
+        
+        function showSuccess(msg) {
+            const el = document.getElementById('successMsg');
+            el.textContent = msg;
+            el.classList.remove('hidden');
+            setTimeout(() => el.classList.add('hidden'), 3000);
+        }
+        
+        // Login
+        async function login() {
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+            
+            if (!username || !password) {
+                showError('Please fill all fields');
+                return;
+            }
+            
+            try {
+                const res = await fetch(`${API}/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    localStorage.setItem('user', JSON.stringify(data.user));
+                    currentUser = data.user;
+                    showDesktop();
+                    showToast(`Welcome, ${data.user.username}!`, 'success');
+                } else {
+                    showError(data.error || 'Login failed');
+                }
+            } catch (e) {
+                showError('Connection error');
+            }
+        }
+        
+        // Signup
+        async function signup() {
+            const username = document.getElementById('newUsername').value.trim();
+            const password = document.getElementById('newPassword').value;
+            
+            if (!username || !password) {
+                showError('Please fill all fields');
+                return;
+            }
+            
+            if (username.length < 3) {
+                showError('Username must be at least 3 characters');
+                return;
+            }
+            
+            if (password.length < 6) {
+                showError('Password must be at least 6 characters');
+                return;
+            }
+            
+            try {
+                const res = await fetch(`${API}/signup`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    showLogin();
+                    showSuccess('Account created! Please login.');
+                } else {
+                    showError(data.error || 'Signup failed');
+                }
+            } catch (e) {
+                showError('Connection error');
+            }
+        }
+        
+        // Logout
+        async function logout() {
+            await fetch(`${API}/logout`, { method: 'POST' });
+            localStorage.removeItem('user');
+            currentUser = null;
+            document.getElementById('loginScreen').classList.remove('hidden');
+            document.getElementById('desktopScreen').classList.add('hidden');
+        }
+        
+        // Show desktop
+        function showDesktop() {
+            document.getElementById('loginScreen').classList.add('hidden');
+            document.getElementById('desktopScreen').classList.remove('hidden');
+            document.getElementById('userDisplay').textContent = currentUser?.username || 'Guest';
+            loadFiles();
+        }
+        
+        // Check session on load - require login
+        function checkSession() {
+            const savedUser = localStorage.getItem('puterra_user');
+            if (savedUser) {
+                currentUser = JSON.parse(savedUser);
+                showDesktop();
+                restoreChatHistory();
+            }
+            // If no saved user, stay on login screen
+        }
+        
+        // Save chat to history
+        function saveChatHistory() {
+            const messagesDiv = document.getElementById('chatMessages');
+            if (messagesDiv) {
+                localStorage.setItem('puterra_chat_html', messagesDiv.innerHTML);
+            }
+            // Also save chatHistory array
+            localStorage.setItem('puterra_chat_history', JSON.stringify(chatHistory));
+        }
+        
+        // Restore chat history
+        function restoreChatHistory() {
+            const savedHtml = localStorage.getItem('puterra_chat_html');
+            const savedHistory = localStorage.getItem('puterra_chat_history');
+            const messagesDiv = document.getElementById('chatMessages');
+            
+            if (savedHistory) {
+                try {
+                    chatHistory = JSON.parse(savedHistory);
+                } catch (e) {
+                    chatHistory = [];
+                }
+            }
+            
+            if (savedHtml && messagesDiv) {
+                messagesDiv.innerHTML = savedHtml;
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            }
+        }
+        
+        // Clear chat history
+        function clearChatHistory() {
+            localStorage.removeItem('puterra_chat_html');
+            localStorage.removeItem('puterra_chat_history');
+            chatHistory = [];
+            const messagesDiv = document.getElementById('chatMessages');
+            if (messagesDiv) {
+                messagesDiv.innerHTML = `<div class="chat-message assistant">
+                    🤖 <b>AI Assistant</b> - I can help you with:
+                    <br><br>
+                    <b>📁 Files:</b> <code>create file xx.txt</code>, <code>write "hello" to xx.txt</code>, <code>read xx.txt</code>, <code>files</code>
+                    <br><br>
+                    <b>🌐 Web:</b> Ask any question and I'll search if needed
+                    <br><br>
+                    <b>💾 Save:</b> <code>kaydet filename.txt</code> to save last response
+                    <br><br>
+                    <b>💻 Terminal:</b> Open Terminal app for shell commands
+                </div>`;
+            }
+        }
+        
+        // Show AI help
+        function showAIHelp() {
+            const helpText = `🤖 <b>AI Assistant Commands:</b>
+<br><br>
+<b>📁 File Operations:</b>
+<br>• <code>create file xx.txt</code> - Create a new file
+<br>• <code>write "content" to xx.txt</code> - Write to a file
+<br>• <code>read xx.txt</code> - Read file content
+<br>• <code>delete xx.txt</code> - Delete a file
+<br>• <code>files</code> or <code>list</code> - Show all files
+<br><br>
+<b>🌐 Web Search:</b>
+<br>• Any question will be searched if needed
+<br><br>
+<b>💻 Terminal:</b>
+<br>• Open Terminal app for shell commands`;
+            const messagesDiv = document.getElementById('chatMessages');
+            messagesDiv.innerHTML += `<div class="chat-message assistant">${helpText}</div>`;
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+        
+        // Load files
+        async function loadFiles() {
+            const username = currentUser?.username || 'guest';
+            try {
+                const res = await fetch(`${API}/files/${username}`);
+                const data = await res.json();
+                
+                if (data.success) {
+                    files = data.files || [];
+                    renderDesktop();
+                }
+            } catch (e) {
+                showToast('Failed to load files', 'error');
+            }
+        }
+        
+        // Render desktop
+        function renderDesktop() {
+            const container = document.getElementById('desktopIcons');
+            
+            let html = `
+                <div class="desktop-icon" ondblclick="openApp('files')">
+                    <i class="fas fa-folder text-yellow-400"></i>
+                    <span>Files</span>
+                </div>
+                <div class="desktop-icon" ondblclick="openApp('ai')">
+                    <i class="fas fa-robot text-purple-400"></i>
+                    <span>AI Chat</span>
+                </div>
+                <div class="desktop-icon" ondblclick="openApp('terminal')">
+                    <i class="fas fa-terminal text-green-400"></i>
+                    <span>Terminal</span>
+                </div>
+                <div class="desktop-icon" ondblclick="openApp('settings')">
+                    <i class="fas fa-cog text-gray-400"></i>
+                    <span>Settings</span>
+                </div>
+            `;
+            
+            files.forEach((file, i) => {
+                const icon = file.is_dir ? 'fa-folder text-yellow-400' : getFileIcon(file.name);
+                html += `
+                    <div class="desktop-icon ${selectedItems.includes(i) ? 'selected' : ''}" 
+                         onclick="selectItem(event, ${i})" 
+                         ondblclick="openFile('${file.name}', ${file.is_dir})">
+                        <i class="fas ${icon}"></i>
+                        <span>${file.name}</span>
+                    </div>
+                `;
+            });
+            
+            container.innerHTML = html;
+        }
+        
+        // Get file icon
+        function getFileIcon(filename) {
+            const ext = filename.split('.').pop().toLowerCase();
+            const icons = {
+                'pdf': 'fa-file-pdf text-red-400',
+                'doc': 'fa-file-word text-blue-400',
+                'docx': 'fa-file-word text-blue-400',
+                'js': 'fa-file-code text-yellow-400',
+                'py': 'fa-file-code text-blue-400',
+                'rs': 'fa-file-code text-orange-400',
+                'html': 'fa-file-code text-orange-400',
+                'css': 'fa-file-code text-blue-400',
+                'json': 'fa-file-code text-yellow-400',
+                'txt': 'fa-file-alt text-gray-400',
+                'md': 'fa-file-alt text-gray-400',
+                'jpg': 'fa-file-image text-purple-400',
+                'jpeg': 'fa-file-image text-purple-400',
+                'png': 'fa-file-image text-purple-400',
+                'gif': 'fa-file-image text-purple-400',
+                'mp3': 'fa-file-audio text-pink-400',
+                'mp4': 'fa-file-video text-red-400',
+                'zip': 'fa-file-archive text-yellow-400',
+            };
+            return icons[ext] || 'fa-file text-gray-400';
+        }
+        
+        // Select item
+        function selectItem(event, index) {
+            if (event.ctrlKey || event.metaKey) {
+                const idx = selectedItems.indexOf(index);
+                if (idx > -1) selectedItems.splice(idx, 1);
+                else selectedItems.push(index);
+            } else {
+                selectedItems = [index];
+            }
+            renderDesktop();
+        }
+        
+        // Open app
+        function openApp(app) {
+            document.querySelectorAll('.taskbar-item').forEach(el => el.classList.remove('active'));
+            document.getElementById(`taskbar-${app}`)?.classList.add('active');
+            // DON'T clear windowsContainer - keep existing windows
+            
+            // Check if window already exists
+            const existingWin = document.getElementById(`window-${app}`);
+            if (existingWin) {
+                // Just bring it to front
+                existingWin.style.zIndex = ++windowZIndex;
+                existingWin.classList.remove('minimized');
+                return;
+            }
+            
+            if (app === 'files') {
+                createWindow('files', '📁 Files', `
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                        <div style="display:flex;gap:8px;">
+                            <button onclick="createNewFolder()" style="background:rgba(234,179,8,0.2);border:1px solid rgba(234,179,8,0.3);color:#fbbf24;border-radius:6px;padding:6px 12px;cursor:pointer;">
+                                <i class="fas fa-folder-plus"></i> New Folder
+                            </button>
+                            <button onclick="createNewFile()" style="background:rgba(99,102,241,0.2);border:1px solid rgba(99,102,241,0.3);color:#818cf8;border-radius:6px;padding:6px 12px;cursor:pointer;">
+                                <i class="fas fa-file-plus"></i> New File
+                            </button>
+                            <button onclick="uploadFile()" style="background:rgba(34,197,94,0.2);border:1px solid rgba(34,197,94,0.3);color:#22c55e;border-radius:6px;padding:6px 12px;cursor:pointer;">
+                                <i class="fas fa-upload"></i> Upload
+                            </button>
+                        </div>
+                        <div style="display:flex;gap:4px;">
+                            <button onclick="renameSelected()" style="background:transparent;border:1px solid rgba(255,255,255,0.2);color:#9ca3af;border-radius:6px;padding:6px 10px;cursor:pointer;" title="Rename">
+                                <i class="fas fa-edit"></i>
+                            </button>
+                            <button onclick="deleteSelected()" style="background:transparent;border:1px solid rgba(239,68,68,0.3);color:#ef4444;border-radius:6px;padding:6px 10px;cursor:pointer;" title="Delete">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                            <button onclick="loadFiles()" style="background:transparent;border:1px solid rgba(255,255,255,0.2);color:#9ca3af;border-radius:6px;padding:6px 10px;cursor:pointer;" title="Refresh">
+                                <i class="fas fa-sync"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="file-grid" id="fileGrid">
+                        ${files.length === 0 ? '<div style="grid-column:1/-1;text-align:center;color:#6b7280;padding:40px;"><i class="fas fa-folder-open" style="font-size:3rem;margin-bottom:12px;opacity:0.3;"></i><p>No files yet</p><p style="font-size:0.75rem;margin-top:4px;">Right-click to create folders and files</p></div>' : ''}
+                        ${files.map((file, i) => `
+                            <div class="file-item ${selectedItems.includes(i) ? 'selected' : ''}" 
+                                 onclick="selectItem(event, ${i})"
+                                 ondblclick="openFile('${file.name}', ${file.is_dir})">
+                                <i class="fas ${file.is_dir ? 'fa-folder text-yellow-400' : getFileIcon(file.name)}"></i>
+                                <span>${file.name}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                `, 650, 450);
+            } else if (app === 'ai') {
+                createWindow('ai', '🤖 AI Assistant', `
+                    <div class="chat-container">
+                        <div class="chat-messages" id="chatMessages">
+                            <div class="chat-message assistant">
+                                🤖 <b>AI Assistant</b> - I can help you with:
+                                <br><br>
+                                <b>📁 Files:</b> <code>create file xx.txt</code>, <code>write "hello" to xx.txt</code>, <code>read xx.txt</code>, <code>files</code>
+                                <br><br>
+                                <b>🌐 Web:</b> Ask any question and I'll search if needed
+                                <br><br>
+                                <b>💻 Terminal:</b> Open Terminal app for shell commands
+                            </div>
+                        </div>
+                        <div class="chat-input-area">
+                            <input type="text" class="chat-input" id="chatInput" placeholder="Ask anything... (e.g., 'create file notes.txt')" onkeypress="if(event.key==='Enter')sendChat()">
+                            <button class="chat-send" onclick="sendChat()">
+                                <i class="fas fa-paper-plane"></i>
+                            </button>
+                        </div>
+                    </div>
+                `, 550, 420);
+            } else if (app === 'terminal') {
+                createWindow('terminal', 'Terminal', `
+                    <div class="terminal">
+                        <div class="terminal-output" id="terminalOutput">
+                            <div class="terminal-line"><span class="terminal-prompt">puterra@cloud:~$</span> Welcome to Puterra Terminal</div>
+                            <div class="terminal-line terminal-info">Type 'help' for available commands</div>
+                        </div>
+                        <div class="terminal-input-line">
+                            <span class="terminal-prompt">$</span>
+                            <input type="text" class="terminal-input" id="terminalInput" placeholder="Type a command..." onkeypress="if(event.key==='Enter')executeCommand()">
+                        </div>
+                    </div>
+                `, 600, 350);
+            } else if (app === 'settings') {
+                createWindow('settings', 'Settings', `
+                    <div style="padding:10px;">
+                        <h3 style="margin-bottom:15px;">Account</h3>
+                        <p style="color:#9ca3af;margin-bottom:20px;">Username: ${currentUser?.username || 'Unknown'}</p>
+                        <h3 style="margin-bottom:15px;">Storage</h3>
+                        <p style="color:#9ca3af;">Files: ${files.length}</p>
+                    </div>
+                `, 400, 300);
+            }
+            
+            showToast(`Opening ${app}...`, 'info');
+        }
+        
+        // Convert markdown to HTML (with proper line breaks)
+        function markdownToHtml(text) {
+            // First escape HTML for safety
+            let html = text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+            
+            // Split by lines
+            const lines = html.split('\n');
+            let result = [];
+            
+            for (let line of lines) {
+                // Headers
+                if (line.startsWith('### ')) {
+                    result.push('<h4 style="margin:10px 0 4px;font-weight:600;">' + line.slice(4) + '</h4>');
+                } else if (line.startsWith('## ')) {
+                    result.push('<h3 style="margin:12px 0 6px;font-weight:600;">' + line.slice(3) + '</h3>');
+                } else if (line.startsWith('# ')) {
+                    result.push('<h2 style="margin:14px 0 8px;font-weight:600;font-size:1.1em;">' + line.slice(2) + '</h2>');
+                } else if (line === '---') {
+                    result.push('<hr style="border:none;border-top:1px solid rgba(255,255,255,0.2);margin:12px 0;">');
+                } else if (line.startsWith('- ')) {
+                    result.push('<div style="margin-left:12px;">• ' + line.slice(2) + '</div>');
+                } else {
+                    // Process inline markdown
+                    line = line
+                        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                        .replace(/\*(.*?)\*/g, '<em>$1</em>');
+                    result.push(line);
+                }
+            }
+            
+            return result.join('<br>');
+        }
+        
+        // Chat
+        async function sendChat() {
+            const input = document.getElementById('chatInput');
+            const message = input.value.trim();
+            if (!message) return;
+            
+            const messagesDiv = document.getElementById('chatMessages');
+            messagesDiv.innerHTML += `<div class="chat-message user">${escapeHtml(message)}</div>`;
+            input.value = '';
+            
+            // Add to history
+            chatHistory.push({ role: 'user', content: message });
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            
+            // Add loading indicator
+            const loadingId = 'loading-' + Date.now();
+            messagesDiv.innerHTML += `<div class="chat-message assistant" id="${loadingId}"><i class="fas fa-spinner fa-spin"></i> Thinking...</div>`;
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            
+            const username = currentUser?.username || 'guest';
+            
+            // Keywords that should trigger web search directly
+            const searchKeywords = ['hava', 'weather', 'haber', 'news', 'güncel', 'current', 'bugün', 'today', 'hafta', 'week', 'ay', 'month', 'sinema', 'cinema', 'film', 'movie', 'vizyon', 'fiyat', 'price', 'kaç', 'ne kadar', 'ne zaman', 'when', 'kim', 'who', 'nerede', 'where', 'son', 'latest', 'yeni', 'new', '2024', '2025', '2026', 'dakika', 'kktc', 'kıbrıs', 'lefkosa', 'girne', 'mağusa', 'hangi', 'neler'];
+            const needsWebSearch = searchKeywords.some(kw => message.toLowerCase().includes(kw));
+            
+            // Clear chat
+            if (/^(?:clear|temizle|new chat|yeni sohbet)$/i.test(message)) {
+                clearChatHistory();
+                document.getElementById(loadingId)?.remove();
+                return;
+            }
+            
+            // Save chat after each message
+            setTimeout(saveChatHistory, 100);
+            
+            // Check for file commands
+            const fileCreateMatch = message.match(/(?:create|make|new|olu[ştur]|yeni)\s+(?:a\s+)?(?:file|dosya)?\s*:?\s*"?(\S+\.?\S*)"?/i);
+            const fileWriteMatch = message.match(/(?:write|yaz)\s+"([^"]+)"\s+(?:into|to|içine)?\s*:?\s*(\S+\.?\S*)/i);
+            const fileReadMatch = message.match(/(?:read|oku|g[öster]|show|what(?:'s| is) (?:in|the content of)|contents? of)\s+(?:the\s+)?(?:file\s+)?(\S+\.?\S*)/i);
+            const fileListMatch = message.match(/^(?:list|dosyalar|files|show files|what files)$/i);
+            const fileDeleteMatch = message.match(/(?:delete|remove|sil)\s+(?:the\s+)?(?:file\s+)?(\S+\.?\S*)/i);
+            
+            try {
+                // Turkish file question patterns: "xx.txt dosyasının içeriği nedir?" etc.
+                const trFileReadMatch = message.match(/(\S+\.txt)\s+dosyas[ıi]n[ıi]n\s+içeri[ğğ]i\s+(?:nedir|ne)/i) ||
+                                        message.match(/(\S+\.txt)\s+(?:içeri[ğğ]i|içinde\s+ne\s+var)/i) ||
+                                        message.match(/(?:dosya\s+)?(\S+\.txt)\s+(?:nedir|içeri[ğğ]i)/i);
+                
+                // Save file command: "kaydet sinema.txt" or "save as sinema.txt"
+                const saveFileMatch = message.match(/(?:kaydet|save|yaz)\s+(?:olarak|as)?\s*:?\s*(\S+\.txt|\S+\.md|\S+\.json|\S+\.csv)/i);
+                
+                // Save last response to file
+                if (saveFileMatch) {
+                    const fileName = saveFileMatch[1].includes('.') ? saveFileMatch[1] : saveFileMatch[1] + '.txt';
+                    const lastAssistantMsg = [...chatHistory].reverse().find(h => h.role === 'assistant');
+                    
+                    if (lastAssistantMsg) {
+                        document.getElementById(loadingId).innerHTML = '<i class="fas fa-spinner fa-spin"></i> Kaydediliyor...';
+                        
+                        const res = await fetch(`${API}/files/write`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ username, name: fileName, content: lastAssistantMsg.content })
+                        });
+                        const data = await res.json();
+                        
+                        document.getElementById(loadingId)?.remove();
+                        if (data.success) {
+                            messagesDiv.innerHTML += `<div class="chat-message assistant">✅ <strong>${fileName}</strong> olarak kaydedildi!</div>`;
+                            chatHistory.push({ role: 'assistant', content: `Saved as ${fileName}` });
+                            saveChatHistory();
+                        } else {
+                            messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">❌ Dosya kaydedilemedi</div>`;
+                        }
+                        return;
+                    } else {
+                        document.getElementById(loadingId)?.remove();
+                        messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">Kaydedilecek içerik bulunamadı. Önce bir soru sorun.</div>`;
+                        return;
+                    }
+                }
+                
+                if (trFileReadMatch) {
+                    const fileName = trFileReadMatch[1];
+                    document.getElementById(loadingId).innerHTML = '<i class="fas fa-spinner fa-spin"></i> Reading file...';
+                    
+                    const res = await fetch(`${API}/files/read`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username, name: fileName })
+                    });
+                    const data = await res.json();
+                    
+                    document.getElementById(loadingId)?.remove();
+                    if (data.success) {
+                        const content = data.content || '(boş dosya)';
+                        messagesDiv.innerHTML += `<div class="chat-message assistant">📄 <strong>${fileName}</strong> içeriği:\n<pre style="white-space:pre-wrap;background:rgba(0,0,0,0.2);padding:8px;border-radius:4px;">${escapeHtml(content)}</pre></div>`;
+                        chatHistory.push({ role: 'assistant', content: `Dosya ${fileName} içeriği: ${content}` });
+                    } else {
+                        messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">❌ Dosya bulunamadı: ${fileName}</div>`;
+                    }
+                    saveChatHistory();
+                    return;
+                }
+                
+                // File creation
+                if (fileCreateMatch) {
+                    const fileName = fileCreateMatch[1].includes('.') ? fileCreateMatch[1] : fileCreateMatch[1] + '.txt';
+                    document.getElementById(loadingId).innerHTML = '<i class="fas fa-spinner fa-spin"></i> Creating file...';
+                    
+                    const res = await fetch(`${API}/files/create`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username, name: fileName, type: 'file' })
+                    });
+                    const data = await res.json();
+                    
+                    document.getElementById(loadingId)?.remove();
+                    if (data.success) {
+                        messagesDiv.innerHTML += `<div class="chat-message assistant">✅ Created file: <strong>${fileName}</strong><br>You can write to it or open it in the Files app.</div>`;
+                        loadFiles();
+                    } else {
+                        messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">❌ Failed to create file: ${data.error || 'Unknown error'}</div>`;
+                    }
+                    return;
+                }
+                
+                // File write
+                if (fileWriteMatch) {
+                    const content = fileWriteMatch[1];
+                    const fileName = fileWriteMatch[2].includes('.') ? fileWriteMatch[2] : fileWriteMatch[2] + '.txt';
+                    document.getElementById(loadingId).innerHTML = '<i class="fas fa-spinner fa-spin"></i> Writing to file...';
+                    
+                    const res = await fetch(`${API}/files/write`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username, name: fileName, content })
+                    });
+                    const data = await res.json();
+                    
+                    document.getElementById(loadingId)?.remove();
+                    if (data.success) {
+                        messagesDiv.innerHTML += `<div class="chat-message assistant">✅ Written to <strong>${fileName}</strong>:<br><code>${escapeHtml(content.substring(0, 200))}${content.length > 200 ? '...' : ''}</code></div>`;
+                    } else {
+                        messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">❌ Failed to write: ${data.error || 'Unknown error'}</div>`;
+                    }
+                    return;
+                }
+                
+                // File read
+                if (fileReadMatch) {
+                    const fileName = fileReadMatch[1].includes('.') ? fileReadMatch[1] : fileReadMatch[1] + '.txt';
+                    document.getElementById(loadingId).innerHTML = '<i class="fas fa-spinner fa-spin"></i> Reading file...';
+                    
+                    const res = await fetch(`${API}/files/read`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username, name: fileName })
+                    });
+                    const data = await res.json();
+                    
+                    document.getElementById(loadingId)?.remove();
+                    if (data.success) {
+                        messagesDiv.innerHTML += `<div class="chat-message assistant">📄 <strong>${fileName}</strong>:<br><code style="white-space:pre-wrap">${escapeHtml(data.content || '(empty file)')}</code></div>`;
+                    } else {
+                        messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">❌ Failed to read: ${data.error || 'File not found'}</div>`;
+                    }
+                    return;
+                }
+                
+                // File list
+                if (fileListMatch) {
+                    document.getElementById(loadingId).innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading files...';
+                    
+                    const res = await fetch(`${API}/files/${username}`);
+                    const data = await res.json();
+                    
+                    document.getElementById(loadingId)?.remove();
+                    if (data.success && data.files) {
+                        if (data.files.length === 0) {
+                            messagesDiv.innerHTML += `<div class="chat-message assistant">📁 No files yet. Create one with "create file xx.txt"</div>`;
+                        } else {
+                            const fileList = data.files.map(f => `${f.is_dir ? '📁' : '📄'} ${f.name}`).join('<br>');
+                            messagesDiv.innerHTML += `<div class="chat-message assistant">📁 Your files:<br>${fileList}</div>`;
+                        }
+                    }
+                    return;
+                }
+                
+                // File delete
+                if (fileDeleteMatch) {
+                    const fileName = fileDeleteMatch[1].includes('.') ? fileDeleteMatch[1] : fileDeleteMatch[1] + '.txt';
+                    document.getElementById(loadingId).innerHTML = '<i class="fas fa-spinner fa-spin"></i> Deleting file...';
+                    
+                    const res = await fetch(`${API}/files/delete`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username, names: [fileName] })
+                    });
+                    const data = await res.json();
+                    
+                    document.getElementById(loadingId)?.remove();
+                    if (data.success) {
+                        messagesDiv.innerHTML += `<div class="chat-message assistant">🗑️ Deleted: <strong>${fileName}</strong></div>`;
+                        loadFiles();
+                    } else {
+                        messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">❌ Failed to delete: ${data.error || 'Unknown error'}</div>`;
+                    }
+                    return;
+                }
+                
+                // =====================================================
+                // STEP 1: Decide if we need to search the web
+                // =====================================================
+                
+                // First check: does the question need current info?
+                const timeKeywords = ['sinema', 'cinema', 'film', 'movie', 'vizyon', 'hava', 'weather', 
+                    'haber', 'news', 'güncel', 'fiyat', 'price', 'kaç', 'ne zaman', 'when', 
+                    'hangi', 'which', 'kim', 'who', 'nerede', 'where', 'kktc', 'kıbrıs', 
+                    'bugün', 'today', 'bu hafta', 'bu ay', '2024', '2025', '2026'];
+                
+                const needsSearch = timeKeywords.some(kw => message.toLowerCase().includes(kw));
+                
+                // If time-sensitive question, skip LLM decision and search directly
+                if (needsSearch) {
+                    console.log(`[AI] FORCE SEARCH: "${message}"`);
+                    searchQuery = message;
+                } else {
+                    // Ask LLM for decision
+                    const toolsRes = await fetch(`${API}/chat`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            message: `User asks: "${message}"
+
+Reply with EXACTLY one line:
+SEARCH: <search query> (if question needs current/real-time info)
+ANSWER: <your answer> (if general knowledge)`,
+                            model: 'glm-5:cloud'
+                        })
+                    });
+                    const toolsData = await toolsRes.json();
+                    
+                    // Build context from chat history
+                    historyContext = '';
+                    if (chatHistory.length > 0) {
+                        historyContext = 'Previous conversation:\n';
+                        chatHistory.slice(-4).forEach(h => {
+                            historyContext += h.role === 'user' ? `User: ${h.content}\n` : `Assistant: ${h.content.substring(0, 150)}...\n`;
+                        });
+                        historyContext += '\n';
+                    }
+                    
+                    // Parse LLM response
+                    let llmDecision = '';
+                    try {
+                        const lines = toolsData.response.split('\n');
+                        for (const line of lines) {
+                            if (line.trim()) {
+                                try {
+                                    const json = JSON.parse(line);
+                                    if (json.message?.content) {
+                                        llmDecision += json.message.content;
+                                    }
+                                } catch (e) {
+                                    llmDecision += line;
+                                }
+                            }
+                        }
+                    } catch (e) {}
+                    if (!llmDecision.trim()) llmDecision = toolsData.response || '';
+                    
+                    console.log(`[AI] LLM decision: "${llmDecision.substring(0, 100)}"`);
+                    
+                    // Parse decision
+                    const willSearch = /SEARCH:/i.test(llmDecision);
+                    
+                    let searchQueryMatch = llmDecision.match(/SEARCH:\s*(.+?)(?:\n|$)/i);
+                    let answerMatch = llmDecision.match(/ANSWER:\s*([\s\S]+?)(?:\n|$)/i);
+                    
+                    searchQuery = searchQueryMatch ? searchQueryMatch[1].trim() : message;
+                    const directAnswer = answerMatch ? answerMatch[1].trim() : '';
+                    
+                    // If LLM decided to answer directly, show it
+                    if (!willSearch && directAnswer) {
+                        document.getElementById(loadingId)?.remove();
+                        messagesDiv.innerHTML += `<div class="chat-message assistant">${markdownToHtml(directAnswer)}</div>`;
+                        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                        chatHistory.push({ role: 'assistant', content: directAnswer });
+                        saveChatHistory();
+                        return;
+                    }
+                }
+                
+                // =====================================================
+                // STEP 2: Execute search (if we reach here, we need to search)
+                // =====================================================
+                const now = new Date();
+                const monthNames = ['Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran', 'Temmuz', 'Ağustos', 'Eylül', 'Ekim', 'Kasım', 'Aralık'];
+                const currentMonth = monthNames[now.getMonth()];
+                const currentYear = now.getFullYear();
+                const currentDate = `${currentMonth} ${currentYear}`;
+                
+                // Add date to search query
+                const finalSearchQuery = `${searchQuery} ${currentDate}`;
+                
+                console.log(`[AI] SEARCHING: "${finalSearchQuery}"`);
+                document.getElementById(loadingId).innerHTML = `<i class="fas fa-search"></i> ${finalSearchQuery.substring(0, 50)}...`;
+                
+                try {
+                    const searchRes = await fetch(`${API}/web_search`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ query: finalSearchQuery, max_results: 8 })
+                    });
+                    const searchData = await searchRes.json();
+                        
+                        if (!searchData.results || searchData.results.length === 0) {
+                            document.getElementById(loadingId)?.remove();
+                            messagesDiv.innerHTML += `<div class="chat-message assistant">Sonuç bulunamadı. Farklı bir arama terimi deneyin.</div>`;
+                            chatHistory.push({ role: 'assistant', content: 'Sonuç bulunamadı.' });
+                            saveChatHistory();
+                            return;
+                        }
+                        
+                        // Format results like Agenty - MORE content
+                        let searchResults = `WEB SEARCH RESULTS (${currentDate}):\n\n`;
+                        searchData.results.slice(0, 8).forEach((r, i) => {
+                            const content = r.content || r.snippet || '';
+                            // Send more content - up to 1000 chars per result
+                            searchResults += `━━━ RESULT ${i + 1} ━━━\n`;
+                            searchResults += `TITLE: ${r.title || 'Untitled'}\n`;
+                            searchResults += `URL: ${r.url}\n`;
+                            searchResults += `CONTENT: ${content.substring(0, 1000)}\n\n`;
+                        });
+                        
+                        // Check if we should fetch more details from promising URLs
+                        const filmUrls = searchData.results
+                            .filter(r => /cinema|sinema|film|movie|beyazperde|boxoffice|sinemalar/i.test(r.url))
+                            .slice(0, 2);
+                        
+                        if (filmUrls.length > 0) {
+                            document.getElementById(loadingId).innerHTML = '<i class="fas fa-spinner fa-spin"></i> 📄 Sayfalardan film listesi çekiliyor...';
+                            
+                            for (const filmUrl of filmUrls) {
+                                try {
+                                    const fetchRes = await fetch(`${API}/web_fetch`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ url: filmUrl.url })
+                                    });
+                                    const fetchData = await fetchRes.json();
+                                    
+                                    if (fetchData.content) {
+                                        searchResults += `\n━━━ DETAILED CONTENT from ${filmUrl.title} ━━━\n`;
+                                        searchResults += fetchData.content.substring(0, 2000) + '\n\n';
+                                    }
+                                } catch (e) {
+                                    console.log('Fetch failed for:', filmUrl.url);
+                                }
+                            }
+                        }
+                        
+                        document.getElementById(loadingId).innerHTML = '<i class="fas fa-spinner fa-spin"></i> 📝 Yanıt oluşturuluyor...';
+                        
+                        // Generate final response with search results
+                        const finalRes = await fetch(`${API}/chat`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ 
+                                message: `I searched the web and found these results:
+
+${searchResults}
+
+Question: ${message}
+
+Using ONLY the information in the search results above, answer the question. Do NOT say "I don't have access to real-time data" - USE the search results provided!`,
+                                model: 'glm-5:cloud'
+                            })
+                        });
+                        const finalData = await finalRes.json();
+                        
+                        document.getElementById(loadingId)?.remove();
+                        
+                        let response = '';
+                        try {
+                            const lines = finalData.response.split('\n');
+                            for (const line of lines) {
+                                if (line.trim()) {
+                                    try {
+                                        const json = JSON.parse(line);
+                                        if (json.message?.content && !json.message?.thinking) {
+                                            response += json.message.content;
+                                        }
+                                    } catch (e) {
+                                        // If not JSON, might be plain text response
+                                        if (!line.includes('"done"') && !line.includes('"thinking"')) {
+                                            response += line + '\n';
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e) {}
+                        if (!response.trim()) response = finalData.response || 'No response';
+                        
+                        messagesDiv.innerHTML += `<div class="chat-message assistant">${markdownToHtml(response.trim())}</div>`;
+                        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                        chatHistory.push({ role: 'assistant', content: response.trim() });
+                        saveChatHistory();
+                        return;
+                        
+                    } catch (e) {
+                        document.getElementById(loadingId)?.remove();
+                        messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">Error: ${e.message}</div>`;
+                    }
+                }
+            } catch (e) {
+                document.getElementById(loadingId)?.remove();
+                messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">Connection error: ${e.message}</div>`;
+            }
+            
+            messagesDiv.scrollTop = messagesDiv.scrollHeight();
+        }
+        
+        // Terminal
+        async function executeCommand() {
+            const input = document.getElementById('terminalInput');
+            const command = input.value.trim();
+            if (!command) return;
+            
+            const output = document.getElementById('terminalOutput');
+            output.innerHTML += `<div class="terminal-line"><span class="terminal-prompt">$</span> ${escapeHtml(command)}</div>`;
+            input.value = '';
+            
+            // Check for built-in commands
+            if (command === 'help') {
+                output.innerHTML += `<div class="terminal-line terminal-info">Available commands:
+  help     - Show this help
+  clear    - Clear terminal
+  tools    - List available tools
+  web      - Web search
+  fetch    - Fetch URL
+  shell    - Execute shell command
+  memory   - Memory operations</div>`;
+                output.scrollTop = output.scrollHeight;
+                return;
+            }
+            
+            if (command === 'clear') {
+                output.innerHTML = '';
+                return;
+            }
+            
+            if (command === 'tools') {
+                try {
+                    const res = await fetch(`${API}/tools`);
+                    const data = await res.json();
+                    if (data.success) {
+                        output.innerHTML += `<div class="terminal-line terminal-info">Available tools:</div>`;
+                        data.tools.forEach(t => {
+                            output.innerHTML += `<div class="terminal-line">  ${t.name} - ${t.description}</div>`;
+                        });
+                    }
+                } catch (e) {
+                    output.innerHTML += `<div class="terminal-line terminal-error">Error: ${e.message}</div>`;
+                }
+                output.scrollTop = output.scrollHeight;
+                return;
+            }
+            
+            // Send to API
+            try {
+                const res = await fetch(`${API}/shell`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ command })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    if (data.stdout) output.innerHTML += `<div class="terminal-line">${escapeHtml(data.stdout)}</div>`;
+                    if (data.stderr) output.innerHTML += `<div class="terminal-line terminal-error">${escapeHtml(data.stderr)}</div>`;
+                } else {
+                    output.innerHTML += `<div class="terminal-line terminal-error">Error: ${data.error || 'Command failed'}</div>`;
+                }
+            } catch (e) {
+                output.innerHTML += `<div class="terminal-line terminal-error">Error: ${e.message}</div>`;
+            }
+            
+            output.scrollTop = output.scrollHeight;
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Create window
+        function createWindow(id, title, content, width = 500, height = 400) {
+            const container = document.getElementById('windowsContainer');
+            const win = document.createElement('div');
+            win.id = `window-${id}`;
+            win.className = 'window fade-in';
+            win.style.width = `${width}px`;
+            win.style.height = `${height}px`;
+            win.style.left = `${(window.innerWidth - width) / 2}px`;
+            win.style.top = `${(window.innerHeight - height) / 2 - 30}px`;
+            win.style.zIndex = ++windowZIndex;
+            
+            win.innerHTML = `
+                <div class="window-header">
+                    <div class="window-title">
+                        <span>${title}</span>
+                    </div>
+                    <div class="window-controls">
+                        <button class="window-btn minimize" onclick="minimizeWindow('${id}')"></button>
+                        <button class="window-btn maximize" onclick="maximizeWindow('${id}')"></button>
+                        <button class="window-btn close" onclick="closeWindow('${id}')"></button>
+                    </div>
+                </div>
+                <div class="window-content">${content}</div>
+                <div class="window-resize-handle"></div>
+            `;
+            
+            container.appendChild(win);
+            openWindows[id] = true;
+            makeDraggable(win);
+            makeResizable(win);
+        }
+        
+        // Window controls
+        function closeWindow(id) {
+            const win = document.getElementById(`window-${id}`);
+            if (win) win.remove();
+            document.getElementById(`taskbar-${id}`)?.classList.remove('active');
+            delete openWindows[id];
+        }
+        
+        function minimizeWindow(id) {
+            const win = document.getElementById(`window-${id}`);
+            if (win) win.classList.toggle('minimized');
+        }
+        
+        function maximizeWindow(id) {
+            const win = document.getElementById(`window-${id}`);
+            if (win) {
+                if (win.style.width === '100%') {
+                    win.style.width = '500px';
+                    win.style.height = '400px';
+                    win.style.left = `${(window.innerWidth - 500) / 2}px`;
+                    win.style.top = `${(window.innerHeight - 400) / 2 - 30}px`;
+                } else {
+                    win.style.width = '100%';
+                    win.style.height = 'calc(100vh - 50px)';
+                    win.style.left = '0';
+                    win.style.top = '0';
+                }
+            }
+        }
+        
+        // Make window draggable (mouse + touch)
+        function makeDraggable(win) {
+            const header = win.querySelector('.window-header');
+            let isDragging = false;
+            let offsetX, offsetY;
+            
+            // Mouse events
+            header.addEventListener('mousedown', (e) => {
+                if (e.target.classList.contains('window-btn')) return;
+                isDragging = true;
+                offsetX = e.clientX - win.offsetLeft;
+                offsetY = e.clientY - win.offsetTop;
+                win.style.zIndex = ++windowZIndex;
+                e.preventDefault();
+            });
+            
+            document.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+                win.style.left = `${e.clientX - offsetX}px`;
+                win.style.top = `${e.clientY - offsetY}px`;
+            });
+            
+            document.addEventListener('mouseup', () => { isDragging = false; });
+            
+            // Touch events for mobile
+            header.addEventListener('touchstart', (e) => {
+                if (e.target.classList.contains('window-btn')) return;
+                isDragging = true;
+                const touch = e.touches[0];
+                offsetX = touch.clientX - win.offsetLeft;
+                offsetY = touch.clientY - win.offsetTop;
+                win.style.zIndex = ++windowZIndex;
+                e.preventDefault();
+            }, { passive: false });
+            
+            document.addEventListener('touchmove', (e) => {
+                if (!isDragging) return;
+                const touch = e.touches[0];
+                win.style.left = `${touch.clientX - offsetX}px`;
+                win.style.top = `${touch.clientY - offsetY}px`;
+            }, { passive: false });
+            
+            document.addEventListener('touchend', () => { isDragging = false; });
+        }
+        
+        // Make window resizable
+        function makeResizable(win) {
+            const handle = win.querySelector('.window-resize-handle');
+            if (!handle) return;
+            
+            let isResizing = false;
+            let startX, startY, startW, startH;
+            
+            handle.addEventListener('mousedown', (e) => {
+                isResizing = true;
+                startX = e.clientX;
+                startY = e.clientY;
+                startW = win.offsetWidth;
+                startH = win.offsetHeight;
+                e.preventDefault();
+                e.stopPropagation();
+            });
+            
+            document.addEventListener('mousemove', (e) => {
+                if (!isResizing) return;
+                const newW = startW + (e.clientX - startX);
+                const newH = startH + (e.clientY - startY);
+                if (newW >= 300) win.style.width = `${newW}px`;
+                if (newH >= 200) win.style.height = `${newH}px`;
+            });
+            
+            document.addEventListener('mouseup', () => { isResizing = false; });
+            
+            // Touch support for resizing
+            handle.addEventListener('touchstart', (e) => {
+                isResizing = true;
+                const touch = e.touches[0];
+                startX = touch.clientX;
+                startY = touch.clientY;
+                startW = win.offsetWidth;
+                startH = win.offsetHeight;
+                e.preventDefault();
+                e.stopPropagation();
+            }, { passive: false });
+            
+            document.addEventListener('touchmove', (e) => {
+                if (!isResizing) return;
+                const touch = e.touches[0];
+                const newW = startW + (touch.clientX - startX);
+                const newH = startH + (touch.clientY - startY);
+                if (newW >= 300) win.style.width = `${newW}px`;
+                if (newH >= 200) win.style.height = `${newH}px`;
+            }, { passive: false });
+            
+            document.addEventListener('touchend', () => { isResizing = false; });
+        }
+        
+        // Open file
+        async function openFile(name, isDir) {
+            if (isDir) {
+                showToast(`Opening folder: ${name}`, 'info');
+                // TODO: Navigate into folder
+            } else {
+                // Open file editor
+                openFileEditor(name);
+            }
+        }
+        
+        // File Editor Window
+        async function openFileEditor(name) {
+            const username = currentUser?.username || 'guest';
+            try {
+                const res = await fetch(`${API}/files/read`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, name })
+                });
+                const data = await res.json();
+                
+                const content = data.success ? data.content : '';
+                const editorId = `editor-${name.replace(/[^a-z0-9]/gi, '-')}`;
+                
+                // Check if window already exists
+                const existing = document.getElementById(`window-${editorId}`);
+                if (existing) {
+                    existing.style.zIndex = ++windowZIndex;
+                    existing.classList.remove('minimized');
+                    return;
+                }
+                
+                createWindow(editorId, `📄 ${name}`, `
+                    <div style="height:100%;display:flex;flex-direction:column;">
+                        <textarea id="file-content-${editorId}" style="
+                            flex:1;
+                            background:#000;
+                            border:1px solid rgba(255,255,255,0.1);
+                            border-radius:8px;
+                            padding:12px;
+                            color:#fff;
+                            font-family:'JetBrains Mono',monospace;
+                            font-size:13px;
+                            resize:none;
+                            outline:none;
+                        ">${escapeHtml(content)}</textarea>
+                        <div style="margin-top:10px;display:flex;gap:8px;">
+                            <button onclick="saveFileContent('${name}', '${editorId}')" style="
+                                background:linear-gradient(135deg,#22c55e,#16a34a);
+                                border:none;
+                                border-radius:6px;
+                                padding:8px 16px;
+                                color:#fff;
+                                cursor:pointer;
+                                font-weight:500;
+                            ">💾 Save</button>
+                            <button onclick="closeWindow('${editorId}')" style="
+                                background:rgba(239,68,68,0.2);
+                                border:1px solid rgba(239,68,68,0.3);
+                                border-radius:6px;
+                                padding:8px 16px;
+                                color:#ef4444;
+                                cursor:pointer;
+                            ">Cancel</button>
+                        </div>
+                    </div>
+                `, 600, 450);
+            } catch (e) {
+                showToast('Failed to open file', 'error');
+            }
+        }
+        
+        // Save file content
+        async function saveFileContent(name, editorId) {
+            const textarea = document.getElementById(`file-content-${editorId}`);
+            if (!textarea) return;
+            const username = currentUser?.username || 'guest';
+            const content = textarea.value;
+            
+            try {
+                const res = await fetch(`${API}/files/write`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, name, content })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    showToast(`Saved: ${name}`, 'success');
+                } else {
+                    showToast(data.error || 'Save failed', 'error');
+                }
+            } catch (e) {
+                showToast('Connection error', 'error');
+            }
+        }
+        
+        // Context menu
+        document.addEventListener('contextmenu', (e) => {
+            if (document.getElementById('desktopScreen').classList.contains('hidden')) return;
+            e.preventDefault();
+            
+            const menu = document.getElementById('contextMenu');
+            const renameItem = document.getElementById('renameMenuItem');
+            const deleteItem = document.getElementById('deleteMenuItem');
+            
+            // Show/hide rename/delete based on selection
+            if (selectedItems.length === 1) {
+                renameItem.style.display = 'flex';
+                deleteItem.style.display = 'flex';
+            } else if (selectedItems.length > 1) {
+                renameItem.style.display = 'none';
+                deleteItem.style.display = 'flex';
+            } else {
+                renameItem.style.display = 'none';
+                deleteItem.style.display = 'none';
+            }
+            
+            menu.style.left = `${Math.min(e.pageX, window.innerWidth - 170)}px`;
+            menu.style.top = `${Math.min(e.pageY, window.innerHeight - 200)}px`;
+            menu.classList.remove('hidden');
+        });
+        
+        document.addEventListener('click', hideContextMenu);
+        
+        function hideContextMenu() {
+            document.getElementById('contextMenu').classList.add('hidden');
+        }
+        
+        // Rename selected item
+        async function renameSelected() {
+            if (selectedItems.length !== 1) {
+                showToast('Select one item to rename', 'info');
+                return;
+            }
+            await renameItem(selectedItems[0]);
+            hideContextMenu();
+        }
+        
+        // Create new folder
+        async function createNewFolder() {
+            const name = prompt('Folder name:');
+            if (!name) { hideContextMenu(); return; }
+            const username = currentUser?.username || 'guest';
+            
+            try {
+                const res = await fetch(`${API}/files/create`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, name, type: 'folder' })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    showToast(`Created folder: ${name}`, 'success');
+                    loadFiles();
+                } else {
+                    showToast(data.error || 'Failed to create folder', 'error');
+                }
+            } catch (e) {
+                showToast('Connection error', 'error');
+            }
+            hideContextMenu();
+        }
+        
+        // Create new file
+        async function createNewFile() {
+            const name = prompt('File name (e.g., notes.txt):');
+            if (!name) { hideContextMenu(); return; }
+            const username = currentUser?.username || 'guest';
+            
+            try {
+                const res = await fetch(`${API}/files/create`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, name, type: 'file' })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    showToast(`Created file: ${name}`, 'success');
+                    loadFiles();
+                } else {
+                    showToast(data.error || 'Failed to create file', 'error');
+                }
+            } catch (e) {
+                showToast('Connection error', 'error');
+            }
+            hideContextMenu();
+        }
+        
+        // Upload file (TODO: needs backend multipart support)
+        function uploadFile() {
+            showToast('Upload requires backend multipart support - coming soon', 'info');
+            hideContextMenu();
+        }
+        
+        // Delete selected items
+        async function deleteSelected() {
+            if (selectedItems.length === 0) {
+                showToast('Select items to delete', 'info');
+                return;
+            }
+            const username = currentUser?.username || 'guest';
+            const names = selectedItems.map(i => files[i].name).join(', ');
+            if (!confirm(`Delete: ${names}?`)) return;
+            
+            try {
+                const res = await fetch(`${API}/files/delete`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, names: selectedItems.map(i => files[i].name) })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    showToast('Deleted successfully', 'success');
+                    selectedItems = [];
+                    loadFiles();
+                } else {
+                    showToast(data.error || 'Delete failed', 'error');
+                }
+            } catch (e) {
+                showToast('Connection error', 'error');
+            }
+        }
+        
+        // Rename item
+        async function renameItem(index) {
+            const file = files[index];
+            const newName = prompt('New name:', file.name);
+            if (!newName || newName === file.name) return;
+            const username = currentUser?.username || 'guest';
+            
+            try {
+                const res = await fetch(`${API}/files/rename`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, old_name: file.name, new_name: newName })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    showToast('Renamed successfully', 'success');
+                    loadFiles();
+                } else {
+                    showToast(data.error || 'Rename failed', 'error');
+                }
+            } catch (e) {
+                showToast('Connection error', 'error');
+            }
+        }
+        
+        // Refresh
+        function refresh() {
+            loadFiles();
+            hideContextMenu();
+            showToast('Refreshed', 'info');
+        }
+        
+        // Enter key
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('password').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') login();
+            });
+            document.getElementById('newPassword').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') signup();
+            });
+            
+            // Check for saved session, require login if none
+            checkSession();
+        });
+    </script>
+</body>
+</html>

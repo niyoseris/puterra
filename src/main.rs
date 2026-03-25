@@ -1,0 +1,2918 @@
+use actix_web::{web, App, HttpServer, HttpResponse, Responder, get, post};
+use actix_files as fs;
+use actix_multipart::Multipart;
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+use std::collections::HashMap;
+use sha2::{Sha256, Digest};
+use uuid::Uuid;
+use std::process::Command;
+use printpdf::*;
+use std::io::BufWriter;
+use regex::Regex;
+// Import from the external image crate (same version as printpdf uses)
+use ::image::DynamicImage;
+use resvg::usvg::{Options, Tree};
+use resvg::tiny_skia::Pixmap;
+
+// ============================================================
+// TYPES
+// ============================================================
+
+#[derive(Clone, Serialize, Deserialize)]
+struct User {
+    id: String,
+    username: String,
+    password_hash: String,
+}
+
+/// Persistent settings stored in data/settings.json
+#[derive(Clone, Serialize, Deserialize)]
+struct Settings {
+    llm_api_url: String,
+    llm_model: String,
+    llm_api_key: String,
+    /// "ollama" | "openai" | "custom"
+    llm_provider: String,
+    search_engine: String,
+    max_agent_iterations: usize,
+    shell_enabled: bool,
+    admin_password: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            llm_api_url: std::env::var("LLM_API_URL")
+                .or_else(|_| std::env::var("OLLAMA_API_URL"))
+                .unwrap_or_else(|_| "http://localhost:11434/api".to_string()),
+            llm_model: std::env::var("LLM_MODEL")
+                .unwrap_or_else(|_| "llama3.2".to_string()),
+            llm_api_key: std::env::var("LLM_API_KEY")
+                .or_else(|_| std::env::var("OLLAMA_API_KEY"))
+                .unwrap_or_default(),
+            llm_provider: "ollama".to_string(),
+            search_engine: "duckduckgo".to_string(),
+            max_agent_iterations: 6,
+            shell_enabled: true,
+            admin_password: "puterra2026".to_string(),
+        }
+    }
+}
+
+const SETTINGS_PATH: &str = "data/settings.json";
+
+fn load_settings() -> Settings {
+    std::fs::read_to_string(SETTINGS_PATH)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_settings(settings: &Settings) {
+    std::fs::create_dir_all("data").ok();
+    std::fs::write(SETTINGS_PATH, serde_json::to_string_pretty(settings).unwrap_or_default()).ok();
+}
+
+struct AppState {
+    users: Mutex<HashMap<String, User>>,
+    settings: Mutex<Settings>,
+}
+
+#[derive(Serialize)]
+struct FileEntry {
+    name: String,
+    is_dir: bool,
+    size: u64,
+}
+
+#[derive(Deserialize)]
+struct SignupRequest { username: String, password: String }
+#[derive(Deserialize)]
+struct LoginRequest { username: String, password: String }
+#[derive(Deserialize)]
+struct WebSearchRequest { query: String, max_results: Option<usize> }
+#[derive(Deserialize)]
+struct ShellRequest { command: String, cwd: Option<String> }
+#[derive(Deserialize)]
+struct FetchRequest { url: String }
+#[derive(Deserialize)]
+struct MemoryRequest { action: String, key: Option<String>, value: Option<String>, query: Option<String>, username: Option<String> }
+#[derive(Deserialize)]
+struct ChatRequest { message: String, model: Option<String> }
+#[derive(Deserialize)]
+struct CreateRequest { username: String, name: String, r#type: String }
+#[derive(Deserialize)]
+struct DeleteRequest { username: String, names: Vec<String> }
+#[derive(Deserialize)]
+struct RenameRequest { username: String, old_name: String, new_name: String }
+#[derive(Deserialize)]
+struct ReadRequest { username: String, name: String }
+#[derive(Deserialize)]
+struct WriteRequest { username: String, name: String, content: String }
+
+// Agent types
+#[derive(Deserialize)]
+struct AgentRequest {
+    message: String,
+    history: Option<Vec<AgentChatMessage>>,
+    model: Option<String>,
+    username: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+struct AgentChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Serialize, Clone)]
+struct AgentStep {
+    thinking: Option<String>,
+    thought: String,
+    action: Option<String>,
+    action_input: Option<String>,
+    observation: Option<String>,
+}
+
+// Search result from DuckDuckGo
+#[derive(Serialize, Clone)]
+struct SearchResult {
+    title: String,
+    url: String,
+    snippet: String,
+}
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+fn hash_password(password: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(password.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn get_user_dir(username: &str) -> String {
+    format!("data/users/{}", username)
+}
+
+/// Safe string truncation that respects UTF-8 char boundaries
+fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Get a snapshot of current settings (reads from file each time for freshness)
+fn current_settings() -> Settings {
+    load_settings()
+}
+
+/// Convert HTML to plain text
+fn html_to_text(html: &str) -> String {
+    // Remove script, style, noscript blocks (no backreferences - Rust regex doesn't support them)
+    let re_script = regex::Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap();
+    let text = re_script.replace_all(html, "");
+    let re_style = regex::Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap();
+    let text = re_style.replace_all(&text, "");
+    let re_noscript = regex::Regex::new(r"(?is)<noscript[^>]*>.*?</noscript>").unwrap();
+    let text = re_noscript.replace_all(&text, "");
+
+    let re_block = regex::Regex::new(r"(?i)</(p|div|h[1-6]|li|tr|br|hr)[^>]*>").unwrap();
+    let text = re_block.replace_all(&text, "\n");
+
+    let re_br = regex::Regex::new(r"(?i)<br\s*/?>").unwrap();
+    let text = re_br.replace_all(&text, "\n");
+
+    let re_tags = regex::Regex::new(r"<[^>]+>").unwrap();
+    let text = re_tags.replace_all(&text, "");
+
+    let text = text
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&#x27;", "'")
+        .replace("&#x2F;", "/");
+
+    let re_ws = regex::Regex::new(r"\n{3,}").unwrap();
+    let text = re_ws.replace_all(&text, "\n\n");
+
+    let re_spaces = regex::Regex::new(r"[ \t]+").unwrap();
+    let text = re_spaces.replace_all(&text, " ");
+
+    text.trim().to_string()
+}
+
+/// Load an image from a local path or URL
+/// Convert SVG bytes to a DynamicImage by rendering to raster
+fn svg_to_image(svg_bytes: &[u8], width: u32) -> Result<DynamicImage, String> {
+    // Parse SVG
+    let opt = Options::default();
+    let tree = Tree::from_data(svg_bytes, &opt)
+        .map_err(|e| format!("Failed to parse SVG: {}", e))?;
+
+    // Calculate height to maintain aspect ratio
+    let size = tree.size();
+    let aspect = size.height() / size.width();
+    let height = (width as f32 * aspect) as u32;
+
+    // Create pixmap and render
+    let mut pixmap = Pixmap::new(width, height)
+        .ok_or("Failed to create pixmap for SVG rendering")?;
+
+    resvg::render(&tree, resvg::usvg::Transform::identity(), &mut pixmap.as_mut());
+
+    // Convert pixmap to RGBA bytes
+    let rgba_data = pixmap.data();
+
+    // Create image from RGBA bytes
+    let img = ::image::RgbaImage::from_raw(width, height, rgba_data.to_vec())
+        .ok_or("Failed to create image from SVG render")?;
+
+    Ok(DynamicImage::ImageRgba8(img))
+}
+
+/// Load an image from a local path or URL (supports SVG, PNG, JPEG, GIF, WebP, BMP)
+fn load_image(path: &str) -> Result<DynamicImage, String> {
+    // Check if it's a URL
+    if path.starts_with("http://") || path.starts_with("https://") {
+        // Download image from URL in a separate thread to avoid blocking runtime issues
+        let path_owned = path.to_string();
+        let handle = std::thread::spawn(move || {
+            // Create a client that looks like a real browser (required by many sites)
+            let client = reqwest::blocking::Client::builder()
+                .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::limited(10))  // Follow redirects
+                .build()
+                .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+            let response = client.get(&path_owned)
+                .header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .header("Referer", "https://www.google.com/search?q=cyprus+map")
+                .header("Cache-Control", "no-cache")
+                .header("Pragma", "no-cache")
+                .send()
+                .map_err(|e| format!("Failed to download image: {}", e))?;
+
+            // Check for HTTP errors
+            let status = response.status();
+            if !status.is_success() {
+                return Err(format!("HTTP error {} - The image URL returned an error. Status: {}. Try a different image source.", status.as_u16(), status.as_str()));
+            }
+
+            // Check content type for SVG
+            let is_svg = if let Some(content_type) = response.headers().get("content-type") {
+                if let Ok(ct) = content_type.to_str() {
+                    ct.contains("svg") || ct.contains("image/svg")
+                } else {
+                    false
+                }
+            } else {
+                // Fallback to extension check
+                path_owned.to_lowercase().contains(".svg")
+            };
+
+            let bytes = response.bytes()
+                .map_err(|e| format!("Failed to read image bytes: {}", e))?;
+
+            if is_svg {
+                // Convert SVG to PNG (render at 800px width)
+                eprintln!("DEBUG: Detected SVG from Content-Type header");
+                svg_to_image(&bytes, 800)
+            } else {
+                // Check if content is HTML error page
+                let is_html = bytes.starts_with(b"<!DOCTYPE") ||
+                              bytes.starts_with(b"<html") ||
+                              bytes.windows(50).any(|w| w.starts_with(b"<html") || w.starts_with(b"<title>"));
+
+                if is_html {
+                    Err("Server returned HTML error page (possibly blocked or not found). Try a different image URL.".to_string())
+                } else {
+                    // Check if content looks like SVG - search for <svg in first 2000 bytes
+                    let search_len = bytes.len().min(2000);
+                    let search_area = &bytes[..search_len];
+                    let is_svg_content = search_area.windows(4).any(|w| w == b"<svg");
+
+                    if is_svg_content {
+                        eprintln!("DEBUG: Detected SVG from content (found <svg tag)");
+                        svg_to_image(&bytes, 800)
+                    } else {
+                        eprintln!("DEBUG: Not SVG, trying as regular image. First 100 bytes: {:?}", &bytes[..bytes.len().min(100)]);
+                        ::image::load_from_memory(&bytes)
+                            .map_err(|e| format!("Failed to decode image (not SVG): {}", e))
+                    }
+                }
+            }
+        });
+        handle.join().unwrap_or_else(|_| Err("Thread panicked while downloading image".to_string()))
+    } else {
+        // Try as local file path
+        let expanded = if path.starts_with("~") {
+            // Expand ~ to home directory
+            if let Ok(home) = std::env::var("HOME") {
+                path.replacen("~", &home, 1)
+            } else {
+                path.to_string()
+            }
+        } else {
+            path.to_string()
+        };
+
+        // Try the path as-is first, then relative to data/ directory
+        let paths_to_try = vec![
+            expanded.clone(),
+            format!("data/{}", expanded),
+            format!("./{}", expanded),
+        ];
+
+        for try_path in paths_to_try {
+            if let Ok(bytes) = std::fs::read(&try_path) {
+                // Check if it's SVG by extension or content
+                let is_svg = try_path.to_lowercase().ends_with(".svg") ||
+                            try_path.to_lowercase().ends_with(".svgz") ||
+                            bytes.starts_with(b"<svg") ||
+                            (bytes.starts_with(b"<?xml") && bytes.windows(200).any(|w| w.starts_with(b"<svg")));
+
+                if is_svg {
+                    return svg_to_image(&bytes, 800);
+                } else {
+                    return ::image::load_from_memory(&bytes)
+                        .map_err(|e| format!("Failed to decode image '{}': {}", try_path, e));
+                }
+            }
+        }
+
+        Err(format!("Image file not found: {}", path))
+    }
+}
+
+/// Generate a PDF document from title and text content, save to given path
+/// Supports markdown-style images: ![alt](path) where path can be local or URL
+fn generate_pdf(title: &str, content: &str, output_path: &str) -> Result<String, String> {
+    let (doc, page1, layer1) = PdfDocument::new(title, Mm(210.0), Mm(297.0), "Layer 1");
+
+    // Try to find a system TrueType font that supports Unicode/Turkish
+    let font_paths = vec![
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+        "/System/Library/Fonts/Supplemental/Helvetica.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ];
+
+    let font_result = font_paths.iter().find_map(|path| {
+        std::fs::read(path).ok().and_then(|bytes| {
+            doc.add_external_font(bytes.as_slice()).ok()
+        })
+    });
+
+    // Bold font paths
+    let bold_font_paths = vec![
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/Library/Fonts/Arial Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ];
+
+    let bold_font_result = bold_font_paths.iter().find_map(|path| {
+        std::fs::read(path).ok().and_then(|bytes| {
+            doc.add_external_font(bytes.as_slice()).ok()
+        })
+    });
+
+    let font = match font_result {
+        Some(f) => f,
+        None => {
+            // Fallback to built-in font (limited Unicode support)
+            doc.add_builtin_font(BuiltinFont::Helvetica)
+                .map_err(|e| format!("Font error: {}", e))?
+        }
+    };
+
+    let bold_font = match bold_font_result {
+        Some(f) => f,
+        None => {
+            doc.add_builtin_font(BuiltinFont::HelveticaBold)
+                .map_err(|e| format!("Bold font error: {}", e))?
+        }
+    };
+
+    let font_size_title: f32 = 18.0;
+    let font_size_heading: f32 = 14.0;
+    let font_size_body: f32 = 11.0;
+    let line_height: f32 = 5.0; // mm between lines
+    let margin_left: f32 = 20.0;
+    let margin_right: f32 = 20.0;
+    let margin_top: f32 = 25.0;
+    let margin_bottom: f32 = 20.0;
+    let page_width: f32 = 210.0;
+    let page_height: f32 = 297.0;
+    let max_text_width: f32 = page_width - margin_left - margin_right;
+    let max_image_width: f32 = 170.0; // Max image width in mm
+    let max_image_height: f32 = 200.0; // Max image height in mm
+
+    // Approximate chars per line (rough estimate based on font size)
+    let chars_per_line = (max_text_width / (font_size_body * 0.22)) as usize;
+
+    let mut current_page = page1;
+    let mut current_layer = layer1;
+    let mut y_position: f32 = page_height - margin_top;
+
+    // Helper: start new page
+    let new_page = |doc: &PdfDocumentReference, y: &mut f32| -> (PdfPageIndex, PdfLayerIndex) {
+        let (page, layer) = doc.add_page(Mm(210.0), Mm(297.0), "Layer 1");
+        *y = page_height - margin_top;
+        (page, layer)
+    };
+
+    // Helper: add image to PDF
+    let add_image = |doc: &PdfDocumentReference,
+                     page_idx: PdfPageIndex,
+                     layer_idx: PdfLayerIndex,
+                     img: &DynamicImage,
+                     x: f32, y: f32,
+                     max_w: f32, max_h: f32| -> f32 {
+        let layer = doc.get_page(page_idx).get_layer(layer_idx);
+
+        // Get image dimensions
+        let (img_w, img_h) = (img.width() as f32, img.height() as f32);
+
+        // Calculate physical size at 96 DPI (how the image was likely created)
+        // 1 inch = 25.4 mm, 96 DPI means 1 pixel = 25.4/96 mm
+        let px_to_mm = 25.4 / 96.0;
+        let phys_w = img_w * px_to_mm;  // width in mm
+        let phys_h = img_h * px_to_mm;  // height in mm
+
+        // Scale to fit within max dimensions while preserving aspect ratio
+        let scale = if phys_w > max_w || phys_h > max_h {
+            (max_w / phys_w).min(max_h / phys_h).min(1.0)
+        } else {
+            1.0  // Don't upscale small images
+        };
+
+        let _display_w = phys_w * scale;
+        let display_h = phys_h * scale;
+
+        // Create image object
+        let image_obj = Image::from_dynamic_image(img);
+
+        // Add image to layer with transformation
+        // Set DPI to 96 so printpdf interprets pixels correctly
+        image_obj.add_to_layer(
+            layer.clone(),
+            ImageTransform {
+                translate_x: Some(Mm(x)),
+                translate_y: Some(Mm(y - display_h)),
+                scale_x: Some(scale),
+                scale_y: Some(scale),
+                dpi: Some(96.0),  // Tell printpdf to interpret pixels at 96 DPI
+                ..Default::default()
+            },
+        );
+
+        display_h // Return the height used
+    };
+
+    // Write title
+    {
+        let layer = doc.get_page(current_page).get_layer(current_layer);
+        layer.use_text(title, font_size_title, Mm(margin_left), Mm(y_position), &bold_font);
+        y_position -= font_size_title * 0.5 + line_height;
+
+        y_position -= line_height;
+    }
+
+    // Regex to match markdown image syntax: ![alt](path)
+    let img_regex = Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap();
+
+    // Process content line by line
+    let lines: Vec<&str> = content.lines().collect();
+
+    for line_text in &lines {
+        let trimmed = line_text.trim();
+
+        // Check if we need a new page
+        if y_position < margin_bottom + line_height {
+            let (p, l) = new_page(&doc, &mut y_position);
+            current_page = p;
+            current_layer = l;
+        }
+
+        // Empty line = paragraph break
+        if trimmed.is_empty() {
+            y_position -= line_height;
+            continue;
+        }
+
+        // Check for image markdown syntax
+        if let Some(caps) = img_regex.captures(trimmed) {
+            let _alt = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let img_path = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+
+            // Try to load the image
+            match load_image(img_path) {
+                Ok(img) => {
+                    // Check if image fits on current page
+                    let estimated_height = (img.height() as f32 * 0.264583).min(max_image_height);
+                    if y_position - estimated_height < margin_bottom {
+                        let (p, l) = new_page(&doc, &mut y_position);
+                        current_page = p;
+                        current_layer = l;
+                    }
+
+                    // Add image
+                    let img_height = add_image(&doc, current_page, current_layer, &img,
+                                               margin_left, y_position,
+                                               max_image_width, max_image_height);
+
+                    y_position -= img_height + line_height * 2.0; // Space after image
+                }
+                Err(e) => {
+                    // If image fails, show placeholder text
+                    let layer = doc.get_page(current_page).get_layer(current_layer);
+                    layer.use_text(&format!("[Image: {}]", img_path), font_size_body,
+                                   Mm(margin_left), Mm(y_position), &font);
+                    y_position -= line_height;
+                    eprintln!("Warning: {}", e);
+                }
+            }
+            continue;
+        }
+
+        // Detect markdown-style headings
+        let (text, is_heading, is_bold) = if trimmed.starts_with("### ") {
+            (&trimmed[4..], false, true)
+        } else if trimmed.starts_with("## ") {
+            (&trimmed[3..], true, false)
+        } else if trimmed.starts_with("# ") {
+            (&trimmed[2..], true, false)
+        } else if trimmed.starts_with("**") && trimmed.ends_with("**") && trimmed.len() > 4 {
+            (&trimmed[2..trimmed.len()-2], false, true)
+        } else {
+            (trimmed, false, false)
+        };
+
+        // Strip remaining markdown formatting (*, **, |, -)
+        let clean_text = text
+            .replace("**", "")
+            .replace("*", "")
+            .replace("---", "")
+            .replace("___", "");
+
+        if clean_text.trim().is_empty() {
+            y_position -= line_height * 0.5;
+            continue;
+        }
+
+        let (current_font, current_size) = if is_heading {
+            (&bold_font, font_size_heading)
+        } else if is_bold {
+            (&bold_font, font_size_body)
+        } else {
+            (&font, font_size_body)
+        };
+
+        // Word wrap
+        let words: Vec<&str> = clean_text.split_whitespace().collect();
+        let mut current_line = String::new();
+
+        for word in words {
+            let test_line = if current_line.is_empty() {
+                word.to_string()
+            } else {
+                format!("{} {}", current_line, word)
+            };
+
+            if test_line.len() > chars_per_line && !current_line.is_empty() {
+                // Flush current line
+                if y_position < margin_bottom + line_height {
+                    let (p, l) = new_page(&doc, &mut y_position);
+                    current_page = p;
+                    current_layer = l;
+                }
+                let layer = doc.get_page(current_page).get_layer(current_layer);
+                layer.use_text(&current_line, current_size, Mm(margin_left), Mm(y_position), current_font);
+                y_position -= line_height;
+                current_line = word.to_string();
+            } else {
+                current_line = test_line;
+            }
+        }
+
+        // Flush remaining text
+        if !current_line.is_empty() {
+            if y_position < margin_bottom + line_height {
+                let (p, l) = new_page(&doc, &mut y_position);
+                current_page = p;
+                current_layer = l;
+            }
+            let layer = doc.get_page(current_page).get_layer(current_layer);
+            layer.use_text(&current_line, current_size, Mm(margin_left), Mm(y_position), current_font);
+            y_position -= line_height;
+        }
+
+        // Extra spacing after headings
+        if is_heading {
+            y_position -= line_height * 0.5;
+        }
+    }
+
+    // Save to file
+    let file = std::fs::File::create(output_path)
+        .map_err(|e| format!("Could not create file: {}", e))?;
+    let mut writer = BufWriter::new(file);
+    doc.save(&mut writer)
+        .map_err(|e| format!("Could not save PDF: {}", e))?;
+
+    let file_size = std::fs::metadata(output_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    Ok(format!("PDF created: '{}' ({} bytes, {} pages estimated)",
+        output_path.rsplit('/').next().unwrap_or(output_path),
+        file_size,
+        ((lines.len() as f32 / 50.0).ceil() as usize).max(1)
+    ))
+}
+
+/// Web search - dispatches to Ollama Cloud or DuckDuckGo based on settings
+async fn do_web_search(client: &reqwest::Client, query: &str, max_results: usize) -> Vec<SearchResult> {
+    let settings = current_settings();
+
+    // Use Ollama Cloud web search if configured
+    if settings.search_engine == "ollama" {
+        return do_ollama_web_search(client, query, max_results, &settings).await;
+    }
+
+    // Default: DuckDuckGo
+    do_duckduckgo_search(client, query, max_results).await
+}
+
+/// Ollama Cloud web search API (requires API key from ollama.com)
+async fn do_ollama_web_search(client: &reqwest::Client, query: &str, max_results: usize, settings: &Settings) -> Vec<SearchResult> {
+    let api_key = &settings.llm_api_key;
+    if api_key.is_empty() {
+        eprintln!("[Search] Ollama web search requires API key. Falling back to DuckDuckGo.");
+        return do_duckduckgo_search(client, query, max_results).await;
+    }
+
+    let body = serde_json::json!({
+        "query": query,
+        "max_results": max_results.min(10)
+    });
+
+    let res = client
+        .post("https://ollama.com/api/web_search")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await;
+
+    match res {
+        Ok(response) => {
+            if let Ok(text) = response.text().await {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                    // Check for error (some queries fail, e.g. non-English)
+                    if json.get("error").is_some() {
+                        eprintln!("[Search] Ollama web search error for query '{}', falling back to DuckDuckGo", query);
+                        return do_duckduckgo_search(client, query, max_results).await;
+                    }
+                    // Parse Ollama web search results
+                    if let Some(results) = json.get("results").and_then(|r| r.as_array()) {
+                        let parsed: Vec<SearchResult> = results.iter().take(max_results).filter_map(|r| {
+                            Some(SearchResult {
+                                title: r.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                                url: r.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
+                                snippet: r.get("content").and_then(|c| c.as_str())
+                                    .map(|s| safe_truncate(s, 500).to_string())
+                                    .unwrap_or_default(),
+                            })
+                        }).collect();
+                        if !parsed.is_empty() {
+                            return parsed;
+                        }
+                    }
+                }
+            }
+            eprintln!("[Search] Ollama web search returned no results, falling back to DuckDuckGo");
+            do_duckduckgo_search(client, query, max_results).await
+        }
+        Err(e) => {
+            eprintln!("[Search] Ollama web search error: {}, falling back to DuckDuckGo", e);
+            do_duckduckgo_search(client, query, max_results).await
+        }
+    }
+}
+
+/// DuckDuckGo HTML search
+async fn do_duckduckgo_search(client: &reqwest::Client, query: &str, max_results: usize) -> Vec<SearchResult> {
+    let res = client
+        .get("https://html.duckduckgo.com/html/")
+        .query(&[("q", query)])
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .send()
+        .await;
+
+    let html = match res {
+        Ok(r) => match r.text().await {
+            Ok(t) => t,
+            Err(_) => return Vec::new(),
+        },
+        Err(_) => return Vec::new(),
+    };
+
+    let mut results = Vec::new();
+
+    let link_re = regex::Regex::new(r#"class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>"#).unwrap();
+    let snippet_re = regex::Regex::new(r#"class="result__snippet"[^>]*>(.*?)</a>"#).unwrap();
+
+    let links: Vec<(String, String)> = link_re.captures_iter(&html)
+        .map(|cap| {
+            let url = cap[1].to_string();
+            let title = html_to_text(&cap[2]);
+            let actual_url = if url.contains("uddg=") {
+                let decoded = url.split("uddg=").nth(1).unwrap_or(&url);
+                urlencoding_decode(decoded)
+            } else {
+                url
+            };
+            (actual_url, title)
+        })
+        .collect();
+
+    let snippets: Vec<String> = snippet_re.captures_iter(&html)
+        .map(|cap| html_to_text(&cap[1]))
+        .collect();
+
+    for (i, (url, title)) in links.iter().enumerate() {
+        if i >= max_results { break; }
+        results.push(SearchResult {
+            title: title.clone(),
+            url: url.clone(),
+            snippet: snippets.get(i).cloned().unwrap_or_default(),
+        });
+    }
+
+    results
+}
+
+/// Simple URL decode
+fn urlencoding_decode(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                result.push(byte as char);
+            }
+        } else if c == '+' {
+            result.push(' ');
+        } else if c == '&' {
+            break;
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Image search result
+#[derive(Clone, Serialize, Deserialize)]
+struct ImageResult {
+    url: String,
+    source: String,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+/// Search for images using multiple sources
+async fn do_image_search(client: &reqwest::Client, query: &str, max_results: usize) -> Vec<ImageResult> {
+    eprintln!("[ImageSearch] Starting search for: {}", query);
+    let mut all_results = Vec::new();
+
+    // 1. Try Wikipedia Commons first (most permissive, good for maps/diagrams)
+    let wiki_results = search_wikipedia_commons(client, query, max_results).await;
+    eprintln!("[ImageSearch] Wikimedia: {} results", wiki_results.len());
+    all_results.extend(wiki_results);
+
+    if all_results.len() >= max_results {
+        return all_results.into_iter().take(max_results).collect();
+    }
+
+    // 2. Try Unsplash API (free, high quality photos)
+    let unsplash_results = search_unsplash(client, query, max_results - all_results.len()).await;
+    eprintln!("[ImageSearch] Unsplash: {} results", unsplash_results.len());
+    all_results.extend(unsplash_results);
+
+    if all_results.len() >= max_results {
+        return all_results.into_iter().take(max_results).collect();
+    }
+
+    // 3. Try DuckDuckGo image search
+    let ddg_results = search_ddg_images(client, query, max_results - all_results.len()).await;
+    eprintln!("[ImageSearch] DuckDuckGo: {} results", ddg_results.len());
+    all_results.extend(ddg_results);
+
+    // 4. Try Pixabay API (free)
+    if all_results.len() < max_results {
+        let pixabay_results = search_pixabay(client, query, max_results - all_results.len()).await;
+        eprintln!("[ImageSearch] Pixabay: {} results", pixabay_results.len());
+        all_results.extend(pixabay_results);
+    }
+
+    eprintln!("[ImageSearch] Total: {} results", all_results.len());
+    all_results.into_iter().take(max_results).collect()
+}
+
+/// Search Unsplash for images
+async fn search_unsplash(client: &reqwest::Client, query: &str, max_results: usize) -> Vec<ImageResult> {
+    let url = format!("https://unsplash.com/napi/search/photos?query={}&per_page={}&order_by=relevance",
+        urlencoding::encode(query),
+        max_results.min(10)
+    );
+
+    let res = client
+        .get(&url)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .header("Accept", "application/json")
+        .send()
+        .await;
+
+    match res {
+        Ok(response) => {
+            if let Ok(text) = response.text().await {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(results) = json.get("results").and_then(|r| r.as_array()) {
+                        return results.iter().take(max_results).filter_map(|item| {
+                            let urls = item.get("urls")?;
+                            let raw_url = urls.get("regular").or_else(|| urls.get("small"))?;
+                            let url = raw_url.as_str()?.to_string();
+                            let width = item.get("width").and_then(|w| w.as_u64()).map(|w| w as u32);
+                            let height = item.get("height").and_then(|h| h.as_u64()).map(|h| h as u32);
+                            Some(ImageResult {
+                                url,
+                                source: "unsplash".to_string(),
+                                width,
+                                height,
+                            })
+                        }).collect();
+                    }
+                }
+            }
+            Vec::new()
+        }
+        Err(_) => Vec::new()
+    }
+}
+
+/// Search DuckDuckGo for images
+async fn search_ddg_images(client: &reqwest::Client, query: &str, max_results: usize) -> Vec<ImageResult> {
+    let url = format!("https://duckduckgo.com/?q={}&iar=images&iax=images&ia=images",
+        urlencoding::encode(query)
+    );
+
+    let res = client
+        .get(&url)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .header("Accept", "text/html")
+        .send()
+        .await;
+
+    match res {
+        Ok(response) => {
+            if let Ok(html) = response.text().await {
+                // Extract image URLs from vqd token and then fetch actual images
+                let vqd_re = regex::Regex::new(r#"vqd\s*=\s*'([^']+)'"#).unwrap();
+                if let Some(caps) = vqd_re.captures(&html) {
+                    let vqd = &caps[1];
+
+                    // Now fetch the actual image results
+                    let images_url = format!("https://duckduckgo.com/i.js?l=wt-wt&o=json&q={}&vqd={}&f=,,,,,,",
+                        urlencoding::encode(query),
+                        vqd
+                    );
+
+                    let img_res = client
+                        .get(&images_url)
+                        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+                        .header("Accept", "application/json")
+                        .header("Referer", "https://duckduckgo.com/")
+                        .send()
+                        .await;
+
+                    if let Ok(img_response) = img_res {
+                        if let Ok(img_text) = img_response.text().await {
+                            if let Ok(img_json) = serde_json::from_str::<serde_json::Value>(&img_text) {
+                                if let Some(results) = img_json.get("results").and_then(|r| r.as_array()) {
+                                    return results.iter().take(max_results).filter_map(|item| {
+                                        let url = item.get("image").and_then(|i| i.as_str())?.to_string();
+                                        let width = item.get("width").and_then(|w| w.as_u64()).map(|w| w as u32);
+                                        let height = item.get("height").and_then(|h| h.as_u64()).map(|h| h as u32);
+                                        Some(ImageResult {
+                                            url,
+                                            source: "duckduckgo".to_string(),
+                                            width,
+                                            height,
+                                        })
+                                    }).collect();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Vec::new()
+        }
+        Err(_) => Vec::new()
+    }
+}
+
+/// Search Pixabay for images (requires API key, fallback to free)
+async fn search_pixabay(client: &reqwest::Client, query: &str, max_results: usize) -> Vec<ImageResult> {
+    // Pixabay has a free API that returns sample results without key
+    let url = format!("https://pixabay.com/api/?q={}&per_page={}&image_type=photo&safesearch=true",
+        urlencoding::encode(query),
+        max_results.min(10)
+    );
+
+    let res = client
+        .get(&url)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .send()
+        .await;
+
+    match res {
+        Ok(response) => {
+            if let Ok(text) = response.text().await {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(hits) = json.get("hits").and_then(|h| h.as_array()) {
+                        return hits.iter().take(max_results).filter_map(|item| {
+                            let url = item.get("largeImageURL").or_else(|| item.get("webformatURL"))?;
+                            let url_str = url.as_str()?.to_string();
+                            let width = item.get("imageWidth").and_then(|w| w.as_u64()).map(|w| w as u32);
+                            let height = item.get("imageHeight").and_then(|h| h.as_u64()).map(|h| h as u32);
+                            Some(ImageResult {
+                                url: url_str,
+                                source: "pixabay".to_string(),
+                                width,
+                                height,
+                            })
+                        }).collect();
+                    }
+                }
+            }
+            Vec::new()
+        }
+        Err(_) => Vec::new()
+    }
+}
+
+/// Search Wikipedia Commons for images (more permissive, good for maps/diagrams)
+async fn search_wikipedia_commons(client: &reqwest::Client, query: &str, max_results: usize) -> Vec<ImageResult> {
+    eprintln!("[ImageSearch] Searching Wikimedia Commons for: {}", query);
+
+    // Use Wikipedia API to search for images on Wikimedia Commons
+    // Using generator approach with imageinfo to get URLs directly
+    let url = format!(
+        "https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrnamespace=6&gsrlimit={}&gsrsearch={}&prop=imageinfo&iiprop=url|mime&format=json",
+        max_results.min(20),
+        urlencoding::encode(query)
+    );
+
+    let res = client
+        .get(&url)
+        .header("User-Agent", "PuterraAgent/1.1 (https://github.com/puterra)")
+        .header("Accept", "application/json")
+        .send()
+        .await;
+
+    match res {
+        Ok(response) => {
+            if let Ok(text) = response.text().await {
+                eprintln!("[ImageSearch] Wikimedia response length: {} bytes", text.len());
+
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(pages) = json.get("query").and_then(|q| q.get("pages")) {
+                        if let Some(pages_obj) = pages.as_object() {
+                            let mut image_results = Vec::new();
+
+                            for (_, page) in pages_obj.iter() {
+                                if image_results.len() >= max_results {
+                                    break;
+                                }
+
+                                // Get the image URL from imageinfo
+                                if let Some(imageinfo) = page.get("imageinfo").and_then(|ii| ii.as_array()) {
+                                    if let Some(info) = imageinfo.first() {
+                                        if let Some(url) = info.get("url").and_then(|u| u.as_str()) {
+                                            let mime = info.get("mime").and_then(|m| m.as_str()).unwrap_or("");
+                                            let is_svg = mime.contains("svg") || url.to_lowercase().ends_with(".svg");
+
+                                            // Prefer PNG/JPEG over SVG for better compatibility
+                                            if !is_svg || image_results.len() < max_results {
+                                                eprintln!("[ImageSearch] Found image: {} (mime: {})", url, mime);
+                                                image_results.push(ImageResult {
+                                                    url: url.to_string(),
+                                                    source: "wikimedia".to_string(),
+                                                    width: None,
+                                                    height: None,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            eprintln!("[ImageSearch] Found {} images from Wikimedia Commons", image_results.len());
+                            return image_results;
+                        }
+                    }
+                }
+            }
+            Vec::new()
+        }
+        Err(e) => {
+            eprintln!("[ImageSearch] Wikimedia Commons error: {}", e);
+            Vec::new()
+        }
+    }
+}
+
+/// Web fetch - dispatches to Ollama Cloud or direct fetch based on settings
+async fn do_web_fetch(client: &reqwest::Client, url: &str) -> Result<String, String> {
+    let settings = current_settings();
+
+    // Use Ollama Cloud web fetch if configured
+    if settings.search_engine == "ollama" && !settings.llm_api_key.is_empty() {
+        match do_ollama_web_fetch(client, url, &settings).await {
+            Ok(content) => return Ok(content),
+            Err(e) => eprintln!("[Fetch] Ollama fetch failed ({}), trying direct fetch", e),
+        }
+    }
+
+    do_direct_web_fetch(client, url).await
+}
+
+/// Ollama Cloud web fetch API
+async fn do_ollama_web_fetch(client: &reqwest::Client, url: &str, settings: &Settings) -> Result<String, String> {
+    let body = serde_json::json!({"url": url});
+
+    let res = client
+        .post("https://ollama.com/api/web_fetch")
+        .header("Authorization", format!("Bearer {}", settings.llm_api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| format!("Ollama fetch error: {}", e))?;
+
+    let text = res.text().await.map_err(|e| format!("Read error: {}", e))?;
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Parse error: {}", e))?;
+
+    if let Some(content) = json.get("content").and_then(|c| c.as_str()) {
+        Ok(content.to_string())
+    } else {
+        Err("No content in Ollama fetch response".to_string())
+    }
+}
+
+/// Direct web fetch - GET a URL and return text content
+async fn do_direct_web_fetch(client: &reqwest::Client, url: &str) -> Result<String, String> {
+    let res = client
+        .get(url)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .header("Accept-Language", "en-US,en;q=0.5,tr;q=0.3")
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Fetch failed: {}", e))?;
+
+    let content_type = res.headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let text = res.text().await.map_err(|e| format!("Read failed: {}", e))?;
+
+    if content_type.contains("html") || text.trim_start().starts_with("<!") || text.trim_start().starts_with("<html") {
+        Ok(html_to_text(&text))
+    } else {
+        Ok(text)
+    }
+}
+
+/// Call LLM with messages array and optional tools (native Ollama/OpenAI tool calling)
+async fn call_llm_chat(
+    client: &reqwest::Client,
+    messages: &[serde_json::Value],
+    tools: Option<&[serde_json::Value]>,
+    model: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let settings = current_settings();
+    let api_url = &settings.llm_api_url;
+    let model = model.unwrap_or(&settings.llm_model);
+    let api_key = &settings.llm_api_key;
+
+    // Build chat endpoint URL
+    // Ollama (local or cloud) uses /chat, OpenAI uses /chat/completions
+    let base = api_url.trim_end_matches('/');
+    let chat_url = if base.ends_with("/chat") || base.ends_with("/chat/completions") {
+        // URL already includes the endpoint path
+        base.to_string()
+    } else if settings.llm_provider == "openai" && !base.contains("ollama.com") {
+        // OpenAI-compatible (not Ollama Cloud)
+        format!("{}/chat/completions", base)
+    } else {
+        // Ollama local or Ollama Cloud
+        format!("{}/chat", base)
+    };
+
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "stream": false
+    });
+
+    if let Some(tools) = tools {
+        if !tools.is_empty() {
+            body["tools"] = serde_json::json!(tools);
+        }
+    }
+
+    let mut req = client
+        .post(&chat_url)
+        .header("Content-Type", "application/json")
+        .json(&body);
+
+    if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", api_key));
+    }
+
+    match req.send().await {
+        Ok(response) => {
+            match response.text().await {
+                Ok(text) => {
+                    eprintln!("[LLM] Response ({} bytes): {}", text.len(), &text);
+
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                        // Check for error response
+                        if let Some(err) = json.get("error").and_then(|e| e.as_str()) {
+                            return Err(format!("LLM error: {}", err));
+                        }
+                        // Ollama format
+                        if json.get("message").is_some() {
+                            return Ok(json);
+                        }
+                        // OpenAI format → normalize
+                        if let Some(msg) = json.get("choices")
+                            .and_then(|c| c.get(0))
+                            .and_then(|c| c.get("message")) {
+                            return Ok(serde_json::json!({
+                                "message": msg,
+                                "done": true
+                            }));
+                        }
+                        // Unknown JSON format - wrap it
+                        return Err(format!("Unexpected LLM response format: {}", safe_truncate(&text, 300)));
+                    }
+                    // Streaming fallback (newline-delimited JSON)
+                    let mut content = String::new();
+                    let mut found_any = false;
+                    for line in text.lines() {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+                            found_any = true;
+                            if let Some(c) = json.get("message")
+                                .and_then(|m| m.get("content"))
+                                .and_then(|c| c.as_str()) {
+                                content.push_str(c);
+                            }
+                        }
+                    }
+                    if found_any && !content.is_empty() {
+                        Ok(serde_json::json!({"message": {"role": "assistant", "content": content}}))
+                    } else {
+                        Err(format!("Could not parse LLM response: {}", safe_truncate(&text, 200)))
+                    }
+                }
+                Err(e) => Err(format!("Error reading LLM response: {}", e)),
+            }
+        }
+        Err(e) => Err(format!("Error calling LLM: {}", e)),
+    }
+}
+
+/// Simple LLM call (for chat endpoint) - backwards compatible
+async fn call_llm(client: &reqwest::Client, prompt: &str, model: Option<&str>) -> String {
+    let messages = vec![serde_json::json!({"role": "user", "content": prompt})];
+    match call_llm_chat(client, &messages, None, model).await {
+        Ok(json) => {
+            json.get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string()
+        }
+        Err(e) => e,
+    }
+}
+
+// ============================================================
+// AUTH ENDPOINTS
+// ============================================================
+
+#[get("/")]
+async fn index() -> impl Responder {
+    match std::fs::read_to_string("public/index.html") {
+        Ok(html) => HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .insert_header(("Cache-Control", "no-cache, no-store, must-revalidate"))
+            .body(html),
+        Err(_) => HttpResponse::NotFound().body("index.html not found"),
+    }
+}
+
+#[post("/api/signup")]
+async fn signup(data: web::Data<AppState>, body: web::Json<SignupRequest>) -> impl Responder {
+    let mut users = data.users.lock().unwrap();
+    if users.contains_key(&body.username) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false, "error": "Username exists"
+        }));
+    }
+    users.insert(body.username.clone(), User {
+        id: Uuid::new_v4().to_string(),
+        username: body.username.clone(),
+        password_hash: hash_password(&body.password),
+    });
+    HttpResponse::Ok().json(serde_json::json!({ "success": true }))
+}
+
+#[post("/api/login")]
+async fn login(data: web::Data<AppState>, body: web::Json<LoginRequest>) -> impl Responder {
+    let users = data.users.lock().unwrap();
+    match users.get(&body.username) {
+        Some(user) if user.password_hash == hash_password(&body.password) => {
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "user": { "username": user.username }
+            }))
+        }
+        _ => HttpResponse::Unauthorized().json(serde_json::json!({
+            "success": false, "error": "Invalid credentials"
+        }))
+    }
+}
+
+#[post("/api/logout")]
+async fn logout() -> impl Responder {
+    HttpResponse::Ok().json(serde_json::json!({ "success": true }))
+}
+
+// ============================================================
+// FILE ENDPOINTS
+// ============================================================
+
+#[get("/api/files/{username}")]
+async fn list_files(path: web::Path<String>) -> impl Responder {
+    let username = path.into_inner();
+    let user_dir = get_user_dir(&username);
+    std::fs::create_dir_all(&user_dir).ok();
+
+    let files: Vec<FileEntry> = std::fs::read_dir(&user_dir)
+        .map(|entries| {
+            entries.filter_map(|e| e.ok())
+                .filter(|e| !e.file_name().to_string_lossy().starts_with("._"))
+                .map(|e| FileEntry {
+                    name: e.file_name().to_string_lossy().to_string(),
+                    is_dir: e.path().is_dir(),
+                    size: e.metadata().map(|m| m.len()).unwrap_or(0),
+                }).collect()
+        }).unwrap_or_default();
+
+    HttpResponse::Ok().json(serde_json::json!({ "success": true, "files": files }))
+}
+
+#[post("/api/files/create")]
+async fn create_item(body: web::Json<CreateRequest>) -> impl Responder {
+    let user_dir = get_user_dir(&body.username);
+    std::fs::create_dir_all(&user_dir).ok();
+    if body.name.contains("..") || body.name.contains('/') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "success": false, "error": "Invalid name" }));
+    }
+    let path = format!("{}/{}", user_dir, body.name);
+    let result = if body.r#type == "folder" { std::fs::create_dir(&path) } else { std::fs::write(&path, "").map(|_| ()) };
+    match result {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "success": true })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "success": false, "error": e.to_string() }))
+    }
+}
+
+#[post("/api/files/delete")]
+async fn delete_items(body: web::Json<DeleteRequest>) -> impl Responder {
+    let user_dir = get_user_dir(&body.username);
+    let mut deleted = 0;
+    for name in &body.names {
+        if name.contains("..") || name.contains('/') { continue; }
+        let path = format!("{}/{}", user_dir, name);
+        if std::fs::remove_file(&path).is_ok() || std::fs::remove_dir_all(&path).is_ok() { deleted += 1; }
+    }
+    HttpResponse::Ok().json(serde_json::json!({ "success": true, "deleted": deleted }))
+}
+
+#[post("/api/files/rename")]
+async fn rename_item(body: web::Json<RenameRequest>) -> impl Responder {
+    let user_dir = get_user_dir(&body.username);
+    if body.old_name.contains("..") || body.old_name.contains('/') || body.new_name.contains("..") || body.new_name.contains('/') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "success": false, "error": "Invalid name" }));
+    }
+    match std::fs::rename(format!("{}/{}", user_dir, body.old_name), format!("{}/{}", user_dir, body.new_name)) {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "success": true })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "success": false, "error": e.to_string() }))
+    }
+}
+
+#[post("/api/files/read")]
+async fn read_file(body: web::Json<ReadRequest>) -> impl Responder {
+    if body.name.contains("..") || body.name.contains('/') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "success": false, "error": "Invalid name" }));
+    }
+    let path = format!("{}/{}", get_user_dir(&body.username), body.name);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => HttpResponse::Ok().json(serde_json::json!({ "success": true, "content": content })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "success": false, "error": e.to_string() }))
+    }
+}
+
+#[post("/api/files/write")]
+async fn write_file(body: web::Json<WriteRequest>) -> impl Responder {
+    if body.name.contains("..") || body.name.contains('/') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "success": false, "error": "Invalid name" }));
+    }
+    let user_dir = get_user_dir(&body.username);
+    std::fs::create_dir_all(&user_dir).ok();
+    match std::fs::write(format!("{}/{}", user_dir, body.name), &body.content) {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "success": true })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "success": false, "error": e.to_string() }))
+    }
+}
+
+/// Download/serve a file (for binary files like PDF, images)
+#[get("/api/files/download/{username}/{filename}")]
+async fn download_file(path: web::Path<(String, String)>) -> impl Responder {
+    let (username, filename) = path.into_inner();
+    if filename.contains("..") || filename.contains('/') {
+        return HttpResponse::BadRequest().body("Invalid filename");
+    }
+    let file_path = format!("{}/{}", get_user_dir(&username), filename);
+    match std::fs::read(&file_path) {
+        Ok(bytes) => {
+            let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+            let content_type = match ext.as_str() {
+                "pdf" => "application/pdf",
+                "png" => "image/png",
+                "jpg" | "jpeg" => "image/jpeg",
+                "gif" => "image/gif",
+                "bmp" => "image/bmp",
+                "webp" => "image/webp",
+                "svg" => "image/svg+xml",
+                "mp3" => "audio/mpeg",
+                "wav" => "audio/wav",
+                "mp4" => "video/mp4",
+                "zip" => "application/zip",
+                "json" => "application/json",
+                "txt" => "text/plain; charset=utf-8",
+                "html" | "htm" => "text/html; charset=utf-8",
+                "css" => "text/css",
+                "js" => "application/javascript",
+                _ => "application/octet-stream",
+            };
+            HttpResponse::Ok()
+                .content_type(content_type)
+                .insert_header(("Content-Disposition", format!("inline; filename=\"{}\"", filename)))
+                .body(bytes)
+        }
+        Err(_) => HttpResponse::NotFound().body("File not found"),
+    }
+}
+
+/// Upload file(s) via multipart form data
+#[post("/api/files/upload/{username}")]
+async fn upload_file(path: web::Path<String>, mut payload: Multipart) -> impl Responder {
+    let username = path.into_inner();
+    let user_dir = get_user_dir(&username);
+    std::fs::create_dir_all(&user_dir).ok();
+
+    let mut uploaded: Vec<String> = Vec::new();
+    let max_size: usize = 50 * 1024 * 1024; // 50 MB per file
+
+    while let Some(item) = payload.next().await {
+        let mut field = match item {
+            Ok(f) => f,
+            Err(e) => {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "success": false, "error": format!("Multipart error: {}", e)
+                }));
+            }
+        };
+
+        // Get filename from content disposition
+        let filename = field.content_disposition()
+            .get_filename()
+            .map(|f| f.to_string())
+            .unwrap_or_else(|| format!("upload_{}", Uuid::new_v4()));
+
+        // Sanitize filename
+        let safe_name: String = filename.chars()
+            .map(|c| if c == '/' || c == '\\' || c == '\0' { '_' } else { c })
+            .collect();
+        if safe_name.contains("..") || safe_name.is_empty() {
+            continue;
+        }
+
+        // Read file bytes
+        let mut bytes = Vec::new();
+        while let Some(chunk) = field.next().await {
+            match chunk {
+                Ok(data) => {
+                    if bytes.len() + data.len() > max_size {
+                        return HttpResponse::BadRequest().json(serde_json::json!({
+                            "success": false,
+                            "error": format!("File '{}' exceeds 50MB limit", safe_name)
+                        }));
+                    }
+                    bytes.extend_from_slice(&data);
+                }
+                Err(e) => {
+                    return HttpResponse::BadRequest().json(serde_json::json!({
+                        "success": false, "error": format!("Read error: {}", e)
+                    }));
+                }
+            }
+        }
+
+        // Write file
+        let file_path = format!("{}/{}", user_dir, safe_name);
+        match std::fs::write(&file_path, &bytes) {
+            Ok(_) => uploaded.push(safe_name),
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false, "error": format!("Write error: {}", e)
+                }));
+            }
+        }
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "uploaded": uploaded,
+        "count": uploaded.len()
+    }))
+}
+
+// ============================================================
+// INTEGRATED TOOL ENDPOINTS (no external API proxy)
+// ============================================================
+
+/// Web Search - uses DuckDuckGo directly
+#[post("/api/web_search")]
+async fn web_search(body: web::Json<WebSearchRequest>) -> impl Responder {
+    let max_results = body.max_results.unwrap_or(8);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+
+    let results = do_web_search(&client, &body.query, max_results).await;
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "results": results
+    }))
+}
+
+/// Web Fetch - fetches URL directly and returns text content
+#[post("/api/web_fetch")]
+async fn web_fetch(body: web::Json<FetchRequest>) -> impl Responder {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+
+    match do_web_fetch(&client, &body.url).await {
+        Ok(content) => HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "content": safe_truncate(&content, 50000)
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "error": e
+        }))
+    }
+}
+
+/// Shell Execute
+#[post("/api/shell")]
+async fn shell_exec(body: web::Json<ShellRequest>) -> impl Responder {
+    let settings = current_settings();
+    if !settings.shell_enabled {
+        return HttpResponse::Forbidden().json(serde_json::json!({ "success": false, "error": "Shell is disabled in settings" }));
+    }
+    let cwd = body.cwd.as_deref().unwrap_or("/tmp");
+    let dangerous = ["rm -rf", "mkfs", "dd if=", "> /dev/", "chmod 777", "chown root"];
+    for d in dangerous {
+        if body.command.contains(d) {
+            return HttpResponse::BadRequest().json(serde_json::json!({ "success": false, "error": "Command not allowed" }));
+        }
+    }
+    match Command::new("sh").arg("-c").arg(&body.command).current_dir(cwd).output() {
+        Ok(output) => {
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": output.status.success(),
+                "stdout": String::from_utf8_lossy(&output.stdout),
+                "stderr": String::from_utf8_lossy(&output.stderr),
+                "code": output.status.code()
+            }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "success": false, "error": format!("Execution failed: {}", e) }))
+    }
+}
+
+/// Memory operations
+#[post("/api/memory")]
+async fn memory(body: web::Json<MemoryRequest>) -> impl Responder {
+    let username = body.username.as_deref().unwrap_or("guest");
+    let mem_path = format!("{}/._memories.json", get_user_dir(username));
+    std::fs::create_dir_all(get_user_dir(username)).ok();
+
+    match body.action.as_str() {
+        "store" => {
+            let key = match &body.key { Some(k) => k.clone(), None => return HttpResponse::BadRequest().json(serde_json::json!({ "success": false, "error": "Key required" })) };
+            let value = match &body.value { Some(v) => v.clone(), None => return HttpResponse::BadRequest().json(serde_json::json!({ "success": false, "error": "Value required" })) };
+            let mut memories: HashMap<String, String> = std::fs::read_to_string(&mem_path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            memories.insert(key, value);
+            std::fs::write(&mem_path, serde_json::to_string_pretty(&memories).unwrap_or_default()).ok();
+            HttpResponse::Ok().json(serde_json::json!({ "success": true }))
+        }
+        "get" => {
+            let key = match &body.key { Some(k) => k.clone(), None => return HttpResponse::BadRequest().json(serde_json::json!({ "success": false, "error": "Key required" })) };
+            let memories: HashMap<String, String> = std::fs::read_to_string(&mem_path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            let value = memories.get(&key).cloned();
+            HttpResponse::Ok().json(serde_json::json!({ "success": true, "value": value }))
+        }
+        "search" => {
+            let query = match &body.query { Some(q) => q.clone(), None => return HttpResponse::BadRequest().json(serde_json::json!({ "success": false, "error": "Query required" })) };
+            let memories: HashMap<String, String> = std::fs::read_to_string(&mem_path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            let results: HashMap<&String, &String> = memories.iter().filter(|(k, v)| k.contains(&query) || v.contains(&query)).collect();
+            HttpResponse::Ok().json(serde_json::json!({ "success": true, "results": results }))
+        }
+        _ => HttpResponse::BadRequest().json(serde_json::json!({ "success": false, "error": "Invalid action" }))
+    }
+}
+
+/// Chat - direct LLM call
+#[post("/api/chat")]
+async fn chat(body: web::Json<ChatRequest>) -> impl Responder {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .unwrap_or_default();
+
+    let model = body.model.as_deref();
+    let response = call_llm(&client, &body.message, model).await;
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "response": response
+    }))
+}
+
+// ============================================================
+// AGENT: Native Tool Calling (Ollama / OpenAI compatible)
+// ============================================================
+
+/// Build the system message for the agent
+fn build_system_prompt(username: &str) -> String {
+    let now = chrono::Utc::now();
+    format!(
+        r#"You are Puterra AI, an advanced agentic assistant inside Puterra Cloud OS.
+Current date: {}. User: {}.
+
+You have access to tools for web search, file operations, code execution, memory, and more.
+Use tools when you need real-time data, file operations, or system actions.
+NEVER say "I don't have access to real-time data" - use your tools instead!
+
+Rules:
+- For current events, weather, prices, news -> use web_search
+- You can chain tools: search -> web_fetch -> analyze
+- Respond in the SAME LANGUAGE as the user's message
+- Use markdown formatting in your answers
+- Be helpful and detailed
+- If run_python fails due to a missing library, tell the user which library is needed and ASK if they want you to install it. If they agree, install it with shell_exec (pip install <library>). Do NOT keep retrying with workarounds.
+- Files can only be saved to the user's cloud storage (flat names, no paths with slashes)
+- To create PDF files, ALWAYS use the create_pdf tool. NEVER use Python/reportlab/fpdf for PDFs. The create_pdf tool is built-in, reliable, and supports markdown.
+- The create_pdf tool supports images: ![alt](path). Use image_search to find reliable image URLs before creating PDFs.
+- For PDFs with images: FIRST use image_search to find working image URLs, THEN create the PDF. This avoids broken images from blocked URLs.
+- image_search tool: Use this to find direct image URLs for maps, diagrams, photos, etc. It returns URLs you can use directly in create_pdf.
+- When user says "bunu PDF olarak kaydet" or "save as PDF", use the content from your PREVIOUS answer in this conversation. Do NOT search again.
+
+Tool Reuse Strategy:
+- When you write code to accomplish a repeatable task, save it as a custom tool using file_write to the tools/ directory as a JSON file.
+- Before writing code from scratch, check existing custom tools with file_list to see if a relevant tool already exists.
+- Tools should be GENERAL PURPOSE and REUSABLE, not single-use scripts. Example: write a general "web_scraper" tool with URL+selector params, not a "scrape_kktc_cinemas" tool.
+- When an existing tool almost fits, read it with file_read and improve it rather than creating a new one."#,
+        now.format("%Y-%m-%d %H:%M UTC"),
+        username
+    )
+}
+
+/// Build native tool definitions for Ollama/OpenAI tool calling API
+fn build_tool_definitions(username: &str) -> Vec<serde_json::Value> {
+    let mut tools = vec![
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search the web using DuckDuckGo for current information, news, prices, events, etc.",
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "web_fetch",
+                "description": "Fetch and read the text content of a web page URL",
+                "parameters": {
+                    "type": "object",
+                    "required": ["url"],
+                    "properties": {
+                        "url": {"type": "string", "description": "URL to fetch"}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "image_search",
+                "description": "Search for images and get direct image URLs. Use this when you need images for PDFs, presentations, or visual content. Returns image URLs that can be used directly in create_pdf.",
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {
+                        "query": {"type": "string", "description": "Image search query (e.g., 'Cyprus map', 'sunset beach', 'city skyline')"}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "file_list",
+                "description": "List all files in the user's cloud storage",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "file_read",
+                "description": "Read the content of a file from user's storage",
+                "parameters": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": {"type": "string", "description": "File name to read"}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "file_write",
+                "description": "Write content to a file (creates if not exists, overwrites if exists)",
+                "parameters": {
+                    "type": "object",
+                    "required": ["name", "content"],
+                    "properties": {
+                        "name": {"type": "string", "description": "File name"},
+                        "content": {"type": "string", "description": "Content to write"}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "file_create",
+                "description": "Create an empty file or folder",
+                "parameters": {
+                    "type": "object",
+                    "required": ["name", "type"],
+                    "properties": {
+                        "name": {"type": "string", "description": "File or folder name"},
+                        "type": {"type": "string", "description": "Either 'file' or 'folder'", "enum": ["file", "folder"]}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "file_delete",
+                "description": "Delete a file or folder from user's storage",
+                "parameters": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": {"type": "string", "description": "File or folder name to delete"}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "shell_exec",
+                "description": "Execute a shell command on the server",
+                "parameters": {
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": {
+                        "command": {"type": "string", "description": "Shell command to execute"}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "memory_store",
+                "description": "Store information in persistent memory for later retrieval",
+                "parameters": {
+                    "type": "object",
+                    "required": ["key", "value"],
+                    "properties": {
+                        "key": {"type": "string", "description": "Memory key/topic"},
+                        "value": {"type": "string", "description": "Information to store"}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "memory_search",
+                "description": "Search previously stored memories",
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {
+                        "query": {"type": "string", "description": "Search terms"}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "run_python",
+                "description": "Execute Python code on the server and return output. If a library is missing, ask the user for permission to install it via shell_exec before retrying.",
+                "parameters": {
+                    "type": "object",
+                    "required": ["code"],
+                    "properties": {
+                        "code": {"type": "string", "description": "Python code to execute"}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "run_javascript",
+                "description": "Execute JavaScript/Node.js code on the server and return output",
+                "parameters": {
+                    "type": "object",
+                    "required": ["code"],
+                    "properties": {
+                        "code": {"type": "string", "description": "JavaScript code to execute"}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "create_pdf",
+                "description": "Create a PDF document and save it to the user's cloud storage. Supports markdown-style formatting (# headings, **bold**, bullet lists). Perfect for reports, summaries, and documents. Content should be plain text or simple markdown.",
+                "parameters": {
+                    "type": "object",
+                    "required": ["filename", "title", "content"],
+                    "properties": {
+                        "filename": {"type": "string", "description": "Output filename (e.g. 'report.pdf')"},
+                        "title": {"type": "string", "description": "Document title shown at the top of the PDF"},
+                        "content": {"type": "string", "description": "Document content as plain text or simple markdown. Use # for headings, **text** for bold, - for bullet points."}
+                    }
+                }
+            }
+        }),
+    ];
+
+    // Add custom tools from user's tools directory
+    let tools_dir = format!("{}/tools", get_user_dir(username));
+    if let Ok(entries) = std::fs::read_dir(&tools_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            if !entry.file_name().to_string_lossy().ends_with(".json") { continue; }
+            if let Ok(tool_json) = std::fs::read_to_string(entry.path()) {
+                if let Ok(tool_def) = serde_json::from_str::<serde_json::Value>(&tool_json) {
+                    let name = tool_def.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                    let desc = tool_def.get("description").and_then(|d| d.as_str()).unwrap_or("Custom tool");
+                    tools.push(serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": format!("custom_{}", name),
+                            "description": desc,
+                            "parameters": {
+                                "type": "object",
+                                "properties": tool_def.get("parameters").cloned().unwrap_or(serde_json::json!({}))
+                            }
+                        }
+                    }));
+                }
+            }
+        }
+    }
+
+    tools
+}
+
+/// Execute a tool directly (no HTTP calls to self)
+async fn execute_tool(
+    tool: &str,
+    input_json: &str,
+    username: &str,
+    client: &reqwest::Client,
+) -> String {
+    let input: serde_json::Value = serde_json::from_str(input_json).unwrap_or(serde_json::json!({}));
+
+    match tool.to_lowercase().as_str() {
+        "web_search" => {
+            let query = input.get("query").and_then(|q| q.as_str()).unwrap_or("");
+            if query.is_empty() { return "Error: query is required".to_string(); }
+
+            let results = do_web_search(client, query, 8).await;
+            if results.is_empty() {
+                return "No search results found. Try a different query.".to_string();
+            }
+
+            let mut out = format!("Found {} results:\n\n", results.len());
+            for (i, r) in results.iter().enumerate() {
+                out += &format!("{}. **{}**\n   URL: {}\n   {}\n\n", i + 1, r.title, r.url, r.snippet);
+            }
+            out
+        }
+
+        "web_fetch" => {
+            let url = input.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            if url.is_empty() { return "Error: url is required".to_string(); }
+
+            match do_web_fetch(client, url).await {
+                Ok(content) => safe_truncate(&content, 5000).to_string(),
+                Err(e) => format!("Fetch error: {}", e),
+            }
+        }
+
+        "image_search" => {
+            let query = input.get("query").and_then(|q| q.as_str()).unwrap_or("");
+            if query.is_empty() { return "Error: query is required".to_string(); }
+
+            let results = do_image_search(client, query, 5).await;
+            if results.is_empty() {
+                return "No images found. Try a different search query.".to_string();
+            }
+
+            let mut out = format!("Found {} images for '{}':\n\n", results.len(), query);
+            for (i, r) in results.iter().enumerate() {
+                out += &format!("{}. {}\n   Source: {}\n   Usage: ![image]({})\n\n", i + 1, r.url, r.source, r.url);
+            }
+            out += "\nCopy any URL above to use in create_pdf with ![alt](URL)";
+            out
+        }
+
+        "file_list" => {
+            let user_dir = get_user_dir(username);
+            std::fs::create_dir_all(&user_dir).ok();
+            match std::fs::read_dir(&user_dir) {
+                Ok(entries) => {
+                    let files: Vec<String> = entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| !e.file_name().to_string_lossy().starts_with("._"))
+                        .map(|e| {
+                            let name = e.file_name().to_string_lossy().to_string();
+                            if e.path().is_dir() { format!("[folder] {}", name) }
+                            else { format!("[file] {} ({} bytes)", name, e.metadata().map(|m| m.len()).unwrap_or(0)) }
+                        })
+                        .collect();
+                    if files.is_empty() { "No files found.".to_string() }
+                    else { format!("Files:\n{}", files.join("\n")) }
+                }
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+
+        "file_read" => {
+            let name = input.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            if name.is_empty() || name.contains("..") || name.contains('/') {
+                return "Error: valid file name is required".to_string();
+            }
+            match std::fs::read_to_string(format!("{}/{}", get_user_dir(username), name)) {
+                Ok(content) if content.is_empty() => format!("File '{}' is empty.", name),
+                Ok(content) => format!("Content of '{}':\n{}", name, safe_truncate(&content, 5000)),
+                Err(e) => format!("Error reading '{}': {}", name, e),
+            }
+        }
+
+        "file_write" => {
+            let name = input.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let content = input.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            if name.is_empty() || name.contains("..") || name.contains('/') {
+                return "Error: valid file name is required".to_string();
+            }
+            let user_dir = get_user_dir(username);
+            std::fs::create_dir_all(&user_dir).ok();
+            match std::fs::write(format!("{}/{}", user_dir, name), content) {
+                Ok(_) => format!("Written {} bytes to '{}'", content.len(), name),
+                Err(e) => format!("Error writing '{}': {}", name, e),
+            }
+        }
+
+        "file_create" => {
+            let name = input.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let item_type = input.get("type").and_then(|t| t.as_str()).unwrap_or("file");
+            if name.is_empty() || name.contains("..") || name.contains('/') {
+                return "Error: valid name is required".to_string();
+            }
+            let user_dir = get_user_dir(username);
+            std::fs::create_dir_all(&user_dir).ok();
+            let path = format!("{}/{}", user_dir, name);
+            match if item_type == "folder" { std::fs::create_dir(&path) } else { std::fs::write(&path, "").map(|_| ()) } {
+                Ok(_) => format!("Created {} '{}'", item_type, name),
+                Err(e) => format!("Error: {}", e),
+            }
+        }
+
+        "file_delete" => {
+            let name = input.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            if name.is_empty() || name.contains("..") || name.contains('/') {
+                return "Error: valid name is required".to_string();
+            }
+            let path = format!("{}/{}", get_user_dir(username), name);
+            if std::fs::remove_file(&path).is_ok() || std::fs::remove_dir_all(&path).is_ok() {
+                format!("Deleted '{}'", name)
+            } else {
+                format!("'{}' not found", name)
+            }
+        }
+
+        "shell_exec" => {
+            let command = input.get("command").and_then(|c| c.as_str()).unwrap_or("");
+            if command.is_empty() { return "Error: command is required".to_string(); }
+            let dangerous = ["rm -rf", "mkfs", "dd if=", "> /dev/", "chmod 777", "chown root"];
+            if dangerous.iter().any(|d| command.contains(d)) {
+                return "Error: command blocked for safety".to_string();
+            }
+            match Command::new("sh").arg("-c").arg(command).current_dir("/tmp").output() {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let mut result = String::new();
+                    if !stdout.is_empty() { result += &format!("stdout:\n{}\n", safe_truncate(&stdout, 3000)); }
+                    if !stderr.is_empty() { result += &format!("stderr:\n{}\n", safe_truncate(&stderr, 1000)); }
+                    if result.is_empty() { format!("OK (exit {})", output.status.code().unwrap_or(-1)) } else { result }
+                }
+                Err(e) => format!("Failed: {}", e),
+            }
+        }
+
+        "memory_store" => {
+            let key = input.get("key").and_then(|k| k.as_str()).unwrap_or("");
+            let value = input.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            if key.is_empty() || value.is_empty() { return "Error: key and value required".to_string(); }
+            let user_dir = get_user_dir(username);
+            std::fs::create_dir_all(&user_dir).ok();
+            let mem_path = format!("{}/._memories.json", user_dir);
+            let mut memories: HashMap<String, String> = std::fs::read_to_string(&mem_path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            memories.insert(key.to_string(), value.to_string());
+            std::fs::write(&mem_path, serde_json::to_string_pretty(&memories).unwrap_or_default()).ok();
+            format!("Stored: '{}' = '{}'", key, safe_truncate(value, 100))
+        }
+
+        "memory_search" => {
+            let query = input.get("query").and_then(|q| q.as_str()).unwrap_or("");
+            let mem_path = format!("{}/._memories.json", get_user_dir(username));
+            let memories: HashMap<String, String> = std::fs::read_to_string(&mem_path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            let results: Vec<String> = memories.iter()
+                .filter(|(k, v)| k.contains(query) || v.contains(query))
+                .map(|(k, v)| format!("- {}: {}", k, safe_truncate(v, 200)))
+                .collect();
+            if results.is_empty() { format!("No memories matching '{}'", query) }
+            else { format!("Found {}:\n{}", results.len(), results.join("\n")) }
+        }
+
+        "run_python" => {
+            let code = input.get("code").and_then(|c| c.as_str()).unwrap_or("");
+            if code.is_empty() { return "Error: code is required".to_string(); }
+            let settings = current_settings();
+            if !settings.shell_enabled { return "Error: code execution disabled".to_string(); }
+
+            let user_dir = get_user_dir(username);
+            std::fs::create_dir_all(&user_dir).ok();
+            let tmp = format!("{}/._agent_run.py", user_dir);
+            eprintln!("[run_python] Writing {} bytes to {}", code.len(), tmp);
+            if let Err(e) = std::fs::write(&tmp, code) {
+                return format!("Error writing temp file: {}", e);
+            }
+            let result = match Command::new("python3")
+                .arg(&tmp)
+                .current_dir(&user_dir)
+                .env("PYTHONIOENCODING", "utf-8")
+                .output() {
+                Ok(o) => {
+                    let mut r = String::new();
+                    let stdout = String::from_utf8_lossy(&o.stdout);
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    eprintln!("[run_python] exit={} stdout={} stderr={}", o.status.code().unwrap_or(-1), stdout.len(), stderr.len());
+                    if !stdout.is_empty() { r += &stdout; }
+                    if !stderr.is_empty() { r += &format!("\nSTDERR: {}", stderr); }
+                    if r.is_empty() { "OK (no output)".to_string() } else { safe_truncate(&r, 3000).to_string() }
+                }
+                Err(e) => format!("Python not available: {}", e),
+            };
+            std::fs::remove_file(&tmp).ok();
+            result
+        }
+
+        "run_javascript" | "run_js" => {
+            let code = input.get("code").and_then(|c| c.as_str()).unwrap_or("");
+            if code.is_empty() { return "Error: code is required".to_string(); }
+            let settings = current_settings();
+            if !settings.shell_enabled { return "Error: code execution disabled".to_string(); }
+
+            let user_dir = get_user_dir(username);
+            std::fs::create_dir_all(&user_dir).ok();
+            let tmp = format!("{}/._agent_run.js", user_dir);
+            std::fs::write(&tmp, code).ok();
+            let result = match Command::new("node").arg(&tmp).current_dir(&user_dir).output() {
+                Ok(o) => {
+                    let mut r = String::new();
+                    let stdout = String::from_utf8_lossy(&o.stdout);
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    if !stdout.is_empty() { r += &stdout; }
+                    if !stderr.is_empty() { r += &format!("\nSTDERR: {}", stderr); }
+                    if r.is_empty() { "OK (no output)".to_string() } else { safe_truncate(&r, 3000).to_string() }
+                }
+                Err(e) => format!("Node.js not available: {}", e),
+            };
+            std::fs::remove_file(&tmp).ok();
+            result
+        }
+
+        "create_pdf" => {
+            let filename = input.get("filename").and_then(|f| f.as_str()).unwrap_or("document.pdf");
+            let title = input.get("title").and_then(|t| t.as_str()).unwrap_or("Document");
+            let content = input.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            if content.is_empty() { return "Error: content is required".to_string(); }
+            if filename.contains("..") || filename.contains('/') {
+                return "Error: invalid filename (no paths, just a name like report.pdf)".to_string();
+            }
+            let filename = if !filename.ends_with(".pdf") { format!("{}.pdf", filename) } else { filename.to_string() };
+            let user_dir = get_user_dir(username);
+            std::fs::create_dir_all(&user_dir).ok();
+            let output_path = format!("{}/{}", user_dir, filename);
+            match generate_pdf(title, content, &output_path) {
+                Ok(msg) => msg,
+                Err(e) => format!("PDF creation failed: {}", e),
+            }
+        }
+
+        // Handle custom tools (custom_toolname)
+        tool_name if tool_name.starts_with("custom_") => {
+            let custom_name = &tool_name[7..];
+            let tool_path = format!("{}/tools/{}.json", get_user_dir(username), custom_name);
+            match std::fs::read_to_string(&tool_path) {
+                Ok(tool_json) => {
+                    if let Ok(tool_def) = serde_json::from_str::<serde_json::Value>(&tool_json) {
+                        let language = tool_def.get("language").and_then(|l| l.as_str()).unwrap_or("python");
+                        let tool_code = tool_def.get("code").and_then(|c| c.as_str()).unwrap_or("");
+                        let full_code = match language {
+                            "python" => format!("import json\ninput_data = json.loads('{}')\n{}", input_json.replace('\'', "\\'"), tool_code),
+                            _ => format!("const input_data = {};\n{}", input_json, tool_code),
+                        };
+                        let user_dir = get_user_dir(username);
+                        std::fs::create_dir_all(&user_dir).ok();
+                        let (cmd, ext) = if language == "python" { ("python3", "py") } else { ("node", "js") };
+                        let tmp = format!("{}/._custom_run.{}", user_dir, ext);
+                        std::fs::write(&tmp, &full_code).ok();
+                        let result = match Command::new(cmd).arg(&tmp).current_dir(&user_dir).output() {
+                            Ok(o) => {
+                                let stdout = String::from_utf8_lossy(&o.stdout);
+                                let stderr = String::from_utf8_lossy(&o.stderr);
+                                let mut r = stdout.to_string();
+                                if !stderr.is_empty() { r += &format!("\nSTDERR: {}", stderr); }
+                                if r.trim().is_empty() { "OK".to_string() } else { safe_truncate(&r, 3000).to_string() }
+                            }
+                            Err(e) => format!("{} not available: {}", cmd, e),
+                        };
+                        std::fs::remove_file(&tmp).ok();
+                        result
+                    } else {
+                        format!("Error parsing tool: {}", custom_name)
+                    }
+                }
+                Err(_) => format!("Custom tool not found: {}", custom_name),
+            }
+        }
+
+        _ => format!("Unknown tool: '{}'", tool),
+    }
+}
+
+/// Build a ReAct-style system prompt (fallback for models without native tool calling)
+fn build_react_system_prompt(username: &str) -> String {
+    let now = chrono::Utc::now();
+    format!(r#"You are Puterra AI, an advanced agentic assistant inside Puterra Cloud OS.
+Current date: {}. User: {}.
+
+You have access to powerful tools. You MUST use tools when you need real-time information, file operations, or any action.
+
+## Available Tools
+
+1. **web_search** - Search the web for current information
+   Input: {{"query": "search terms"}}
+2. **web_fetch** - Fetch and read content from a specific URL
+   Input: {{"url": "https://example.com"}}
+3. **file_list** - List all files in the user's storage
+   Input: {{}}
+4. **file_read** - Read content of a file
+   Input: {{"name": "filename.txt"}}
+5. **file_write** - Write content to a file
+   Input: {{"name": "filename.txt", "content": "file content"}}
+6. **file_create** - Create an empty file or folder
+   Input: {{"name": "filename.txt", "type": "file"}}
+7. **file_delete** - Delete a file
+   Input: {{"name": "filename.txt"}}
+8. **shell_exec** - Execute a shell command
+   Input: {{"command": "ls -la"}}
+9. **memory_store** - Store information for later retrieval
+   Input: {{"key": "topic", "value": "information"}}
+10. **memory_search** - Search stored memories
+    Input: {{"query": "search terms"}}
+11. **run_python** - Execute Python code
+    Input: {{"code": "print('hello')"}}
+12. **run_javascript** - Execute JavaScript/Node.js code
+    Input: {{"code": "console.log('hello')"}}
+13. **create_pdf** - Create a PDF document and save to user's storage
+    Input: {{"filename": "report.pdf", "title": "My Report", "content": "Heading\n\nBody text here..."}}
+
+## How to respond
+
+**When you need to use a tool:**
+Thought: [your reasoning]
+Action: [tool_name]
+Action Input: [valid JSON input]
+
+**When you have the final answer:**
+Thought: [brief reasoning]
+Final Answer: [your complete answer with markdown formatting]
+
+## Rules
+- For current events, weather, prices, news, schedules -> use web_search FIRST
+- You CAN chain multiple tools: search -> fetch -> analyze -> answer
+- Respond in the SAME LANGUAGE as the user message
+- NEVER say you do not have access to real-time data - USE the tools!
+- To create PDF files, ALWAYS use the create_pdf tool. Do NOT use Python for PDF creation.
+- After receiving an Observation, you MUST either use another tool OR give a Final Answer"#,
+        now.format("%Y-%m-%d %H:%M UTC"), username)
+}
+
+/// Parse ReAct-style response (fallback)
+fn parse_react_response(response: &str) -> (String, Option<String>, Option<String>, Option<String>) {
+    let thought_re = regex::Regex::new(r"(?i)Thought:\s*(.+?)(?:\n|$)").unwrap();
+    let thought = thought_re.captures(response)
+        .map(|c| c[1].trim().to_string())
+        .unwrap_or_default();
+
+    let final_re = regex::Regex::new(r"(?is)Final\s*Answer:\s*(.+)$").unwrap();
+    if let Some(caps) = final_re.captures(response) {
+        return (thought, None, None, Some(caps[1].trim().to_string()));
+    }
+
+    let action_re = regex::Regex::new(r"(?i)Action:\s*(\w+)").unwrap();
+    let action = action_re.captures(response).map(|c| c[1].trim().to_string());
+
+    let input_re = regex::Regex::new(r"(?is)Action\s*Input:\s*(\{.*?\})").unwrap();
+    let mut action_input = input_re.captures(response).map(|c| c[1].trim().to_string());
+
+    if action.is_some() && action_input.is_none() {
+        let input_line_re = regex::Regex::new(r"(?i)Action\s*Input:\s*(.+?)(?:\n|$)").unwrap();
+        if let Some(caps) = input_line_re.captures(response) {
+            let raw = caps[1].trim();
+            action_input = Some(if raw.starts_with('{') {
+                raw.to_string()
+            } else {
+                format!(r#"{{"query": "{}"}}"#, raw)
+            });
+        }
+    }
+
+    (thought, action, action_input, None)
+}
+
+/// Agent with ReAct text-based fallback
+async fn agent_react_fallback(
+    client: &reqwest::Client,
+    message: &str,
+    history: &Option<Vec<AgentChatMessage>>,
+    username: &str,
+    model: Option<&str>,
+) -> (bool, String, Vec<AgentStep>) {
+    let system_prompt = build_react_system_prompt(username);
+    let settings = current_settings();
+    let max_iterations = settings.max_agent_iterations;
+    let mut steps: Vec<AgentStep> = Vec::new();
+
+    let mut conversation = String::new();
+    if let Some(hist) = history {
+        let recent: Vec<&AgentChatMessage> = hist.iter().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect();
+        let total = recent.len();
+        for (i, msg) in recent.iter().enumerate() {
+            let prefix = if msg.role == "user" { "User" } else { "Assistant" };
+            let is_recent = i >= total.saturating_sub(4);
+            let content = if is_recent || msg.content.len() <= 2000 {
+                msg.content.clone()
+            } else {
+                format!("{}...", safe_truncate(&msg.content, 1000))
+            };
+            conversation += &format!("{}: {}\n", prefix, content);
+        }
+    }
+    conversation += &format!("User: {}\n\n", message);
+
+    let mut scratchpad = String::new();
+
+    for _iteration in 0..max_iterations {
+        let full_prompt = format!(
+            "{}\n\n## Conversation\n{}\n## Agent Scratchpad\n{}\n\nContinue with your next Thought and Action, or provide a Final Answer.",
+            system_prompt, conversation, scratchpad
+        );
+
+        let messages = vec![serde_json::json!({"role": "user", "content": full_prompt})];
+        let llm_response = match call_llm_chat(client, &messages, None, model).await {
+            Ok(json) => json.get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string(),
+            Err(e) => return (false, format!("LLM Error: {}", e), steps),
+        };
+
+        if llm_response.is_empty() {
+            return (false, "LLM returned empty response.".to_string(), steps);
+        }
+
+        let (thought, action, action_input, final_answer) = parse_react_response(&llm_response);
+
+        if let Some(answer) = final_answer {
+            steps.push(AgentStep { thinking: None, thought, action: None, action_input: None, observation: None });
+            return (true, answer, steps);
+        }
+
+        if let Some(ref act) = action {
+            let input_str = action_input.as_deref().unwrap_or("{}");
+            let observation = execute_tool(act, input_str, username, client).await;
+
+            steps.push(AgentStep {
+                thinking: None,
+                thought: thought.clone(),
+                action: Some(act.clone()),
+                action_input: action_input.clone(),
+                observation: Some(observation.clone()),
+            });
+
+            scratchpad += &format!(
+                "Thought: {}\nAction: {}\nAction Input: {}\nObservation: {}\n\n",
+                thought, act, input_str, safe_truncate(&observation, 3000)
+            );
+            continue;
+        }
+
+        // No structured output - return as-is
+        let answer = if thought.is_empty() { llm_response.trim().to_string() } else { thought };
+        return (true, answer, steps);
+    }
+
+    // Max iterations
+    let summary_prompt = format!(
+        "{}\n\n## Conversation\n{}\n## Research Done\n{}\n\nProvide a Final Answer based on all observations above.",
+        system_prompt, conversation, scratchpad
+    );
+    let messages = vec![serde_json::json!({"role": "user", "content": summary_prompt})];
+    let final_response = match call_llm_chat(client, &messages, None, model).await {
+        Ok(json) => json.get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string(),
+        Err(e) => return (false, format!("Error: {}", e), steps),
+    };
+    let (_, _, _, final_answer) = parse_react_response(&final_response);
+    let answer = final_answer.unwrap_or_else(|| final_response.trim().to_string());
+
+    (true, answer, steps)
+}
+
+/// Extract content and thinking from LLM message
+fn extract_content(message: &serde_json::Value) -> (String, Option<String>) {
+    let content = message.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let thinking = message.get("thinking").and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string());
+    // If content is empty, use thinking as content fallback
+    let effective_content = if content.is_empty() {
+        thinking.clone().unwrap_or_default()
+    } else {
+        content
+    };
+    (effective_content, thinking)
+}
+
+/// Agent endpoint - Native tool calling with ReAct fallback
+#[post("/api/agent")]
+async fn agent_chat(body: web::Json<AgentRequest>) -> impl Responder {
+    let model = body.model.as_deref();
+    let username = body.username.as_deref().unwrap_or("guest");
+
+    let system_prompt = build_system_prompt(username);
+    let tool_defs = build_tool_definitions(username);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_default();
+
+    let mut steps: Vec<AgentStep> = Vec::new();
+    let settings = current_settings();
+    let max_iterations = settings.max_agent_iterations;
+
+    // Build messages array with system prompt
+    let mut messages: Vec<serde_json::Value> = vec![
+        serde_json::json!({"role": "system", "content": system_prompt}),
+    ];
+
+    // Add conversation history
+    // Last 2 messages get full content (so agent can reference recent answers for "save as PDF" etc.)
+    // Older messages get truncated to save context window
+    if let Some(history) = &body.history {
+        let recent: Vec<&AgentChatMessage> = history.iter().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect();
+        let total = recent.len();
+        for (i, msg) in recent.iter().enumerate() {
+            let is_recent = i >= total.saturating_sub(4); // last 4 messages get full content
+            let content = if is_recent || msg.content.len() <= 2000 {
+                msg.content.clone()
+            } else {
+                format!("{}...", safe_truncate(&msg.content, 1000))
+            };
+            messages.push(serde_json::json!({"role": msg.role, "content": content}));
+        }
+    }
+
+    // Add current user message
+    messages.push(serde_json::json!({"role": "user", "content": body.message}));
+
+    // --- First attempt: Native tool calling ---
+    let first_result = call_llm_chat(&client, &messages, Some(&tool_defs), model).await;
+
+    // Check if native tool calling works
+    let native_works = match &first_result {
+        Ok(json) => {
+            let msg = json.get("message");
+            if let Some(m) = msg {
+                let has_content = m.get("content").and_then(|c| c.as_str()).map_or(false, |c| !c.is_empty());
+                let has_tools = m.get("tool_calls").and_then(|tc| tc.as_array()).map_or(false, |tc| !tc.is_empty());
+                has_content || has_tools
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    };
+
+    // If native tool calling didn't produce a useful response, fall back to ReAct
+    if !native_works {
+        let (success, answer, fallback_steps) =
+            agent_react_fallback(&client, &body.message, &body.history, username, model).await;
+        return HttpResponse::Ok().json(serde_json::json!({
+            "success": success,
+            "answer": answer,
+            "steps": fallback_steps
+        }));
+    }
+
+    // --- Native tool calling loop ---
+    let response_json = first_result.unwrap();
+    let message = response_json.get("message").unwrap().clone();
+    let (content, thinking) = extract_content(&message);
+    let tool_calls = message.get("tool_calls").and_then(|tc| tc.as_array()).cloned();
+
+    // If first response has no tool calls, return directly
+    if tool_calls.is_none() || tool_calls.as_ref().map_or(true, |tc| tc.is_empty()) {
+        // Still include thinking as a step if present
+        if thinking.is_some() {
+            steps.push(AgentStep { thinking: thinking.clone(), thought: String::new(), action: None, action_input: None, observation: None });
+        }
+        let answer = if content.is_empty() { "I couldn't generate a response.".to_string() } else { content };
+        return HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "answer": answer,
+            "steps": steps
+        }));
+    }
+
+    // Process first round of tool calls
+    let tool_calls = tool_calls.unwrap();
+    messages.push(message.clone());
+
+    for tc in &tool_calls {
+        let func = tc.get("function").unwrap_or(tc);
+        let tool_name = func.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+        let arguments = func.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+        let args_str = if arguments.is_string() {
+            arguments.as_str().unwrap_or("{}").to_string()
+        } else {
+            serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string())
+        };
+
+        let observation = execute_tool(tool_name, &args_str, username, &client).await;
+
+        steps.push(AgentStep {
+            thinking: thinking.clone(),
+            thought: content.clone(),
+            action: Some(tool_name.to_string()),
+            action_input: Some(args_str.clone()),
+            observation: Some(observation.clone()),
+        });
+
+        messages.push(serde_json::json!({
+            "role": "tool",
+            "content": safe_truncate(&observation, 4000)
+        }));
+    }
+
+    // Continue tool calling loop for remaining iterations
+    for _iteration in 1..max_iterations {
+        let llm_result = call_llm_chat(&client, &messages, Some(&tool_defs), model).await;
+
+        let response_json = match llm_result {
+            Ok(json) => json,
+            Err(e) => {
+                return HttpResponse::Ok().json(serde_json::json!({
+                    "success": false,
+                    "answer": format!("LLM Error: {}", e),
+                    "steps": steps
+                }));
+            }
+        };
+
+        let message = match response_json.get("message") {
+            Some(m) => m.clone(),
+            None => break,
+        };
+
+        let (content, thinking) = extract_content(&message);
+        let tool_calls = message.get("tool_calls").and_then(|tc| tc.as_array()).cloned();
+
+        if tool_calls.is_none() || tool_calls.as_ref().map_or(true, |tc| tc.is_empty()) {
+            if thinking.is_some() {
+                steps.push(AgentStep { thinking: thinking.clone(), thought: String::new(), action: None, action_input: None, observation: None });
+            }
+            let answer = if content.is_empty() { "I couldn't generate a response.".to_string() } else { content };
+            return HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "answer": answer,
+                "steps": steps
+            }));
+        }
+
+        let tool_calls = tool_calls.unwrap();
+        messages.push(message.clone());
+
+        for tc in &tool_calls {
+            let func = tc.get("function").unwrap_or(tc);
+            let tool_name = func.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+            let arguments = func.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+            let args_str = if arguments.is_string() {
+                arguments.as_str().unwrap_or("{}").to_string()
+            } else {
+                serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string())
+            };
+
+            let observation = execute_tool(tool_name, &args_str, username, &client).await;
+
+            steps.push(AgentStep {
+                thinking: thinking.clone(),
+                thought: content.clone(),
+                action: Some(tool_name.to_string()),
+                action_input: Some(args_str.clone()),
+                observation: Some(observation.clone()),
+            });
+
+            messages.push(serde_json::json!({
+                "role": "tool",
+                "content": safe_truncate(&observation, 4000)
+            }));
+        }
+    }
+
+    // Max iterations reached - ask for a summary with all gathered data
+    messages.push(serde_json::json!({
+        "role": "user",
+        "content": "Please provide your final answer now based on all the information you've gathered. Respond in the same language as the original question."
+    }));
+    let final_result = call_llm_chat(&client, &messages, None, model).await;
+    let answer = match final_result {
+        Ok(json) => {
+            let msg = json.get("message");
+            let content = msg.and_then(|m| m.get("content")).and_then(|c| c.as_str()).unwrap_or("");
+            if content.is_empty() {
+                // Some models put reasoning in "thinking" field
+                msg.and_then(|m| m.get("thinking")).and_then(|t| t.as_str()).unwrap_or("Max iterations reached.").to_string()
+            } else {
+                content.to_string()
+            }
+        }
+        Err(e) => format!("Error: {}", e),
+    };
+
+    HttpResponse::Ok().json(serde_json::json!({ "success": true, "answer": answer, "steps": steps }))
+}
+
+// ============================================================
+// META ENDPOINTS
+// ============================================================
+
+#[get("/api/tools")]
+async fn tools_list() -> impl Responder {
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "tools": [
+            {"name": "web_search", "description": "Search the web (DuckDuckGo)"},
+            {"name": "web_fetch", "description": "Fetch content from a URL"},
+            {"name": "image_search", "description": "Search for images and get direct URLs"},
+            {"name": "shell_exec", "description": "Execute shell commands"},
+            {"name": "memory_store", "description": "Store data in memory"},
+            {"name": "memory_search", "description": "Search stored memories"},
+            {"name": "run_python", "description": "Execute Python code"},
+            {"name": "run_javascript", "description": "Execute JavaScript code"},
+            {"name": "file_list", "description": "List files"},
+            {"name": "file_read", "description": "Read file content"},
+            {"name": "file_write", "description": "Write file content"},
+            {"name": "file_create", "description": "Create file or folder"},
+            {"name": "file_delete", "description": "Delete file or folder"},
+            {"name": "create_pdf", "description": "Create PDF documents (built-in Rust, no external deps)"},
+            {"name": "agent", "description": "Agentic AI with native tool calling"}
+        ]
+    }))
+}
+
+// ============================================================
+// CODE EXECUTION
+// ============================================================
+
+#[derive(Deserialize)]
+struct RunCodeRequest {
+    language: String,
+    code: String,
+    username: Option<String>,
+}
+
+/// Server-side code execution (Python, Node.js, shell)
+#[post("/api/run")]
+async fn run_code(body: web::Json<RunCodeRequest>) -> impl Responder {
+    let settings = current_settings();
+    if !settings.shell_enabled {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "success": false, "error": "Code execution is disabled in settings"
+        }));
+    }
+
+    let username = body.username.as_deref().unwrap_or("guest");
+    let user_dir = get_user_dir(username);
+    std::fs::create_dir_all(&user_dir).ok();
+
+    match body.language.as_str() {
+        "python" => {
+            let tmp_file = format!("{}/._run_tmp.py", user_dir);
+            std::fs::write(&tmp_file, &body.code).ok();
+
+            match Command::new("python3")
+                .arg(&tmp_file)
+                .current_dir(&user_dir)
+                .output()
+            {
+                Ok(output) => {
+                    std::fs::remove_file(&tmp_file).ok();
+                    HttpResponse::Ok().json(serde_json::json!({
+                        "success": output.status.success(),
+                        "stdout": String::from_utf8_lossy(&output.stdout),
+                        "stderr": String::from_utf8_lossy(&output.stderr),
+                        "code": output.status.code()
+                    }))
+                }
+                Err(e) => {
+                    std::fs::remove_file(&tmp_file).ok();
+                    HttpResponse::Ok().json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Python not available: {}", e),
+                        "hint": "Python runs in-browser via Pyodide. Install Python 3 on server for server-side execution."
+                    }))
+                }
+            }
+        }
+
+        "javascript" | "js" => {
+            let tmp_file = format!("{}/._run_tmp.js", user_dir);
+            std::fs::write(&tmp_file, &body.code).ok();
+
+            match Command::new("node")
+                .arg(&tmp_file)
+                .current_dir(&user_dir)
+                .output()
+            {
+                Ok(output) => {
+                    std::fs::remove_file(&tmp_file).ok();
+                    HttpResponse::Ok().json(serde_json::json!({
+                        "success": output.status.success(),
+                        "stdout": String::from_utf8_lossy(&output.stdout),
+                        "stderr": String::from_utf8_lossy(&output.stderr),
+                        "code": output.status.code()
+                    }))
+                }
+                Err(e) => {
+                    std::fs::remove_file(&tmp_file).ok();
+                    HttpResponse::Ok().json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Node.js not available: {}", e),
+                        "hint": "JavaScript can run in-browser. Install Node.js for server-side execution."
+                    }))
+                }
+            }
+        }
+
+        _ => HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": format!("Unsupported language: {}", body.language)
+        }))
+    }
+}
+
+/// List custom tools (stored as .tool.json files in user dir)
+#[get("/api/tools/custom/{username}")]
+async fn list_custom_tools(path: web::Path<String>) -> impl Responder {
+    let username = path.into_inner();
+    let user_dir = get_user_dir(&username);
+    let tools_dir = format!("{}/tools", user_dir);
+    std::fs::create_dir_all(&tools_dir).ok();
+
+    let tools: Vec<serde_json::Value> = std::fs::read_dir(&tools_dir)
+        .map(|entries| {
+            entries.filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+                .filter_map(|e| {
+                    std::fs::read_to_string(e.path()).ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    HttpResponse::Ok().json(serde_json::json!({ "success": true, "tools": tools }))
+}
+
+/// Save a custom tool
+#[post("/api/tools/custom")]
+async fn save_custom_tool(body: web::Json<serde_json::Value>) -> impl Responder {
+    let username = body.get("username").and_then(|u| u.as_str()).unwrap_or("guest");
+    let name = body.get("name").and_then(|n| n.as_str()).unwrap_or("");
+    if name.is_empty() || name.contains("..") || name.contains('/') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "success": false, "error": "Invalid tool name" }));
+    }
+
+    let tools_dir = format!("{}/tools", get_user_dir(username));
+    std::fs::create_dir_all(&tools_dir).ok();
+    let path = format!("{}/{}.json", tools_dir, name);
+
+    match std::fs::write(&path, serde_json::to_string_pretty(&body.0).unwrap_or_default()) {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "success": true })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "success": false, "error": e.to_string() }))
+    }
+}
+
+// ============================================================
+// SETTINGS
+// ============================================================
+
+/// Get settings
+#[get("/api/settings")]
+async fn get_settings() -> impl Responder {
+    let settings = current_settings();
+    let masked_key = if settings.llm_api_key.is_empty() {
+        String::new()
+    } else if settings.llm_api_key.len() <= 8 {
+        "--------".to_string()
+    } else {
+        format!("{}--------{}", &settings.llm_api_key[..4], &settings.llm_api_key[settings.llm_api_key.len()-4..])
+    };
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "settings": {
+            "llm_api_url": settings.llm_api_url,
+            "llm_model": settings.llm_model,
+            "llm_api_key_masked": masked_key,
+            "llm_api_key_set": !settings.llm_api_key.is_empty(),
+            "llm_provider": settings.llm_provider,
+            "search_engine": settings.search_engine,
+            "max_agent_iterations": settings.max_agent_iterations,
+            "shell_enabled": settings.shell_enabled,
+        }
+    }))
+}
+
+/// Update settings
+#[post("/api/settings")]
+async fn update_settings(data: web::Data<AppState>, body: web::Json<serde_json::Value>) -> impl Responder {
+    let mut settings = data.settings.lock().unwrap();
+
+    if let Some(v) = body.get("llm_api_url").and_then(|v| v.as_str()) {
+        if !v.is_empty() { settings.llm_api_url = v.to_string(); }
+    }
+    if let Some(v) = body.get("llm_model").and_then(|v| v.as_str()) {
+        if !v.is_empty() { settings.llm_model = v.to_string(); }
+    }
+    if let Some(v) = body.get("llm_api_key").and_then(|v| v.as_str()) {
+        if !v.contains("--") { settings.llm_api_key = v.to_string(); }
+    }
+    if let Some(v) = body.get("llm_provider").and_then(|v| v.as_str()) {
+        settings.llm_provider = v.to_string();
+    }
+    if let Some(v) = body.get("search_engine").and_then(|v| v.as_str()) {
+        settings.search_engine = v.to_string();
+    }
+    if let Some(v) = body.get("max_agent_iterations").and_then(|v| v.as_u64()) {
+        settings.max_agent_iterations = (v as usize).clamp(1, 20);
+    }
+    if let Some(v) = body.get("shell_enabled").and_then(|v| v.as_bool()) {
+        settings.shell_enabled = v;
+    }
+    if let Some(v) = body.get("admin_password").and_then(|v| v.as_str()) {
+        if !v.is_empty() && v.len() >= 6 {
+            settings.admin_password = v.to_string();
+            let mut users = data.users.lock().unwrap();
+            if let Some(admin) = users.get_mut("admin") {
+                admin.password_hash = hash_password(v);
+            }
+        }
+    }
+
+    save_settings(&settings);
+
+    HttpResponse::Ok().json(serde_json::json!({ "success": true, "message": "Settings saved" }))
+}
+
+/// Test LLM connection
+#[post("/api/settings/test_llm")]
+async fn test_llm() -> impl Responder {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+
+    let response = call_llm(&client, "Say 'OK' in one word.", None).await;
+    let is_error = response.starts_with("Error");
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": !is_error,
+        "response": safe_truncate(&response, 500),
+    }))
+}
+
+#[get("/api/health")]
+async fn health() -> impl Responder {
+    let settings = current_settings();
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "ok",
+        "version": "1.1.0",
+        "llm_url": settings.llm_api_url,
+        "llm_model": settings.llm_model,
+        "llm_provider": settings.llm_provider,
+        "features": ["agent", "native_tool_calling", "web_search", "web_fetch", "shell", "memory", "files", "code_execution"],
+        "search_engine": settings.search_engine
+    }))
+}
+
+// ============================================================
+// MAIN
+// ============================================================
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    dotenv::dotenv().ok();
+    std::fs::create_dir_all("data/users").ok();
+
+    let settings = load_settings();
+    save_settings(&settings);
+
+    let app_state = web::Data::new(AppState {
+        users: Mutex::new(HashMap::new()),
+        settings: Mutex::new(settings.clone()),
+    });
+
+    app_state.users.lock().unwrap().insert("admin".to_string(), User {
+        id: Uuid::new_v4().to_string(),
+        username: "admin".to_string(),
+        password_hash: hash_password(&settings.admin_password),
+    });
+
+    std::fs::create_dir_all("data/users/guest").ok();
+
+    println!("Puterra Cloud OS v1.1.0");
+    println!("LLM: {} [{}] (model: {})", settings.llm_provider, settings.llm_api_url, settings.llm_model);
+    println!("Search: {} (integrated)", settings.search_engine);
+    println!("Agent: Native tool calling, max {} iterations", settings.max_agent_iterations);
+    println!("Shell: {}", if settings.shell_enabled { "enabled" } else { "disabled" });
+    println!("http://0.0.0.0:3707");
+
+    HttpServer::new(move || {
+        App::new()
+            .app_data(app_state.clone())
+            .service(index)
+            .service(signup)
+            .service(login)
+            .service(logout)
+            .service(list_files)
+            .service(create_item)
+            .service(delete_items)
+            .service(rename_item)
+            .service(read_file)
+            .service(write_file)
+            .service(download_file)
+            .service(upload_file)
+            .service(web_search)
+            .service(web_fetch)
+            .service(shell_exec)
+            .service(memory)
+            .service(chat)
+            .service(agent_chat)
+            .service(run_code)
+            .service(list_custom_tools)
+            .service(save_custom_tool)
+            .service(get_settings)
+            .service(update_settings)
+            .service(test_llm)
+            .service(tools_list)
+            .service(health)
+            .service(fs::Files::new("/static", "public"))
+            .default_service(web::route().to(|| async {
+                fs::NamedFile::open("public/index.html")
+            }))
+    })
+    .bind("0.0.0.0:3707")?
+    .run()
+    .await
+}
