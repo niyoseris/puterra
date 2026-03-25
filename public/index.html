@@ -470,6 +470,38 @@
             word-break: break-word;
         }
 
+        .agent-step-thinking {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 0;
+            cursor: pointer;
+            transition: background 0.2s ease;
+        }
+
+        .agent-step-thinking:hover {
+            background: rgba(167, 139, 250, 0.05);
+            border-radius: 4px;
+            padding: 6px 8px;
+        }
+
+        .agent-step-obs-toggle {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 0;
+            cursor: pointer;
+            color: #6b7280;
+            font-size: 0.75rem;
+            transition: background 0.2s ease;
+        }
+
+        .agent-step-obs-toggle:hover {
+            background: rgba(107, 114, 128, 0.05);
+            border-radius: 4px;
+            padding: 4px 8px;
+        }
+
         .agent-status {
             display: flex;
             align-items: center;
@@ -974,6 +1006,8 @@
                 const data = await res.json();
                 
                 if (data.success) {
+                    // Store token for session persistence
+                    localStorage.setItem('auth_token', data.token);
                     localStorage.setItem('user', JSON.stringify(data.user));
                     currentUser = data.user;
                     showDesktop();
@@ -1027,8 +1061,17 @@
         
         // Logout
         async function logout() {
-            await fetch(`${API}/logout`, { method: 'POST' });
+            const token = localStorage.getItem('auth_token');
+            try {
+                await fetch(`${API}/logout`, {
+                    method: 'POST',
+                    headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+                });
+            } catch (e) {
+                // Ignore errors on logout
+            }
             localStorage.removeItem('user');
+            localStorage.removeItem('auth_token');
             currentUser = null;
             document.getElementById('loginScreen').classList.remove('hidden');
             document.getElementById('desktopScreen').classList.add('hidden');
@@ -1044,22 +1087,40 @@
         
         // Check session on load - require login
         function checkSession() {
-            const savedUser = localStorage.getItem('puterra_user');
-            if (savedUser) {
-                currentUser = JSON.parse(savedUser);
-                showDesktop();
-                restoreChatHistory();
+            const savedUser = localStorage.getItem('user');
+            const token = localStorage.getItem('auth_token');
+
+            if (savedUser && token) {
+                // Validate token with server
+                fetch(`${API}/validate-token`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token}` }
+                }).then(r => r.json()).then(data => {
+                    if (data.valid) {
+                        currentUser = JSON.parse(savedUser);
+                        showDesktop();
+                        restoreChatHistory();
+                    } else {
+                        // Token invalid, clear session
+                        localStorage.removeItem('user');
+                        localStorage.removeItem('auth_token');
+                    }
+                }).catch(() => {
+                    // Network error - still show login
+                    localStorage.removeItem('user');
+                    localStorage.removeItem('auth_token');
+                });
             }
-            // If no saved user, stay on login screen
+            // If no saved user/token, stay on login screen
         }
         
         // ============ CONVERSATION MANAGEMENT ============
 
         const WELCOME_HTML = `<div class="chat-message assistant">
             🤖 <b>Puterra AI Agent</b><br><br>
-            Ben bir <b>agentic AI</b>'yım - soru sorabilir, dosya işlemleri yaptırabilir, web araması yapabilir ve daha fazlasını isteyebilirsiniz.<br><br>
-            <b>🔧 Araçlarım:</b> Web Arama, URL Fetch, Dosya Okuma/Yazma, Shell, Hafıza, PDF Oluştur<br>
-            <b>💡 Örnek:</b> "Bugün KKTC'de hava nasıl?", "notes.txt oluştur", "Python ile fibonacci yaz"
+            I'm an <b>agentic AI</b> - you can ask questions, perform file operations, search the web, and much more.<br><br>
+            <b>🔧 My Tools:</b> Web Search, URL Fetch, File Read/Write, Shell, Memory, PDF Create<br>
+            <b>💡 Examples:</b> "What's the weather today?", "Create notes.txt", "Write fibonacci in Python"
         </div>`;
 
         function loadConversations() {
@@ -1076,7 +1137,7 @@
                 if (oldHistory || oldHtml) {
                     const conv = {
                         id: Date.now().toString(),
-                        title: 'Önceki Sohbet',
+                        title: 'Previous Chat',
                         messages: oldHistory ? JSON.parse(oldHistory) : [],
                         html: oldHtml || WELCOME_HTML,
                         created: Date.now()
@@ -1103,7 +1164,7 @@
 
             const conv = {
                 id: Date.now().toString(),
-                title: 'Yeni Sohbet',
+                title: 'New Chat',
                 messages: [],
                 html: WELCOME_HTML,
                 created: Date.now()
@@ -1168,7 +1229,7 @@
         // Auto-title: use first user message as title (max 30 chars)
         function updateConversationTitle(text) {
             const conv = conversations.find(c => c.id === activeConversationId);
-            if (conv && conv.title === 'Yeni Sohbet') {
+            if (conv && conv.title === 'New Chat') {
                 conv.title = text.length > 30 ? text.substring(0, 30) + '...' : text;
                 saveConversations();
                 renderConversationList();
@@ -1180,7 +1241,7 @@
             if (!list) return;
 
             if (conversations.length === 0) {
-                list.innerHTML = '<div style="text-align:center;color:#6b7280;padding:20px;font-size:0.75rem;">Henüz sohbet yok</div>';
+                list.innerHTML = '<div style="text-align:center;color:#6b7280;padding:20px;font-size:0.75rem;">No conversations yet</div>';
                 return;
             }
 
@@ -1192,7 +1253,7 @@
                 return `<div class="chat-sidebar-item ${isActive ? 'active' : ''}" onclick="switchConversation('${c.id}')">
                     <i class="fas fa-comment" style="font-size:0.65rem;flex-shrink:0;"></i>
                     <span class="conv-title" title="${escapeHtml(c.title)}">${escapeHtml(c.title)}</span>
-                    <span class="conv-delete" onclick="deleteConversation('${c.id}', event)" title="Sil"><i class="fas fa-times"></i></span>
+                    <span class="conv-delete" onclick="deleteConversation('${c.id}', event)" title="Delete"><i class="fas fa-times"></i></span>
                 </div>`;
             }).join('');
         }
@@ -1236,7 +1297,7 @@
             if (conv) {
                 conv.messages = [];
                 conv.html = WELCOME_HTML;
-                conv.title = 'Yeni Sohbet';
+                conv.title = 'New Chat';
                 saveConversations();
                 renderConversationList();
             }
@@ -1420,7 +1481,7 @@
                     <div class="chat-layout">
                         <div class="chat-sidebar">
                             <div class="chat-sidebar-header">
-                                <button onclick="newConversation()"><i class="fas fa-plus"></i> Yeni Sohbet</button>
+                                <button onclick="newConversation()"><i class="fas fa-plus"></i> New Chat</button>
                             </div>
                             <div class="chat-sidebar-list" id="conversationList"></div>
                         </div>
@@ -1429,9 +1490,9 @@
                                 <div class="chat-messages" id="chatMessages">
                                     <div class="chat-message assistant">
                                         🤖 <b>Puterra AI Agent</b><br><br>
-                                        Ben bir <b>agentic AI</b>'yım - soru sorabilir, dosya işlemleri yaptırabilir, web araması yapabilir ve daha fazlasını isteyebilirsiniz. Araçlarımı otomatik olarak seçer ve zincirleme kullanırım.<br><br>
-                                        <b>🔧 Araçlarım:</b> Web Arama, URL Fetch, Dosya Okuma/Yazma, Shell, Hafıza, PDF Oluştur<br>
-                                        <b>💡 Örnek:</b> "Bugün KKTC'de hava nasıl?", "notes.txt oluştur", "Python ile fibonacci yaz"
+                                        I'm an <b>agentic AI</b> - you can ask questions, perform file operations, search the web, and much more. I automatically select my tools and use them in chains.<br><br>
+                                        <b>🔧 My Tools:</b> Web Search, URL Fetch, File Read/Write, Shell, Memory, PDF Create<br>
+                                        <b>💡 Examples:</b> "What's the weather today?", "Create notes.txt", "Write fibonacci in Python"
                                     </div>
                                 </div>
                                 <div class="chat-input-area">
@@ -1559,31 +1620,67 @@
                                 <h3 style="margin-bottom:10px;color:#a5b4fc;font-size:0.9rem;text-transform:uppercase;letter-spacing:1px;">
                                     <i class="fas fa-brain"></i> LLM / AI Model
                                 </h3>
-                                <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:10px;">
-                                    <div>
-                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Provider</label>
-                                        <select id="set_llm_provider" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;">
-                                            <option value="ollama">Ollama (Local / Cloud)</option>
-                                            <option value="openai">OpenAI Compatible</option>
-                                            <option value="custom">Custom</option>
-                                        </select>
+                                <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:12px;">
+                                    <!-- Active Source Selector -->
+                                    <div style="border-bottom:1px solid rgba(255,255,255,0.08);padding-bottom:12px;">
+                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:8px;text-transform:uppercase;">Active LLM Source</label>
+                                        <div style="display:flex;gap:8px;">
+                                            <label style="flex:1;display:flex;align-items:center;gap:6px;cursor:pointer;padding:8px;border-radius:6px;border:1px solid rgba(99,102,241,0.3);background:rgba(99,102,241,0.1);">
+                                                <input type="radio" name="llm_source" value="local" id="llm_source_local" checked style="cursor:pointer;">
+                                                <span style="color:#a5b4fc;font-size:0.85rem;flex:1;">Local Ollama</span>
+                                            </label>
+                                            <label style="flex:1;display:flex;align-items:center;gap:6px;cursor:pointer;padding:8px;border-radius:6px;border:1px solid rgba(99,102,241,0.1);background:rgba(99,102,241,0.05);">
+                                                <input type="radio" name="llm_source" value="cloud" id="llm_source_cloud" style="cursor:pointer;">
+                                                <span style="color:#a5b4fc;font-size:0.85rem;flex:1;">Cloud Ollama</span>
+                                            </label>
+                                        </div>
                                     </div>
-                                    <div>
-                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">API URL</label>
-                                        <input type="text" id="set_llm_url" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="http://localhost:11434/api">
+
+                                    <!-- Local Ollama Configuration -->
+                                    <div style="border-bottom:1px solid rgba(255,255,255,0.08);padding-bottom:12px;">
+                                        <label style="color:#94f2d4;font-size:0.8rem;display:block;margin-bottom:8px;text-transform:uppercase;font-weight:600;">📍 Local Ollama Configuration</label>
+                                        <div style="display:flex;flex-direction:column;gap:8px;">
+                                            <div>
+                                                <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">API URL</label>
+                                                <input type="text" id="set_llm_url_local" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="http://localhost:11434/api">
+                                            </div>
+                                            <div>
+                                                <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Model</label>
+                                                <input type="text" id="set_llm_model_local" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="llama3.2">
+                                            </div>
+                                            <div>
+                                                <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">API Key <span style="color:#6b7280;">(optional)</span></label>
+                                                <input type="password" id="set_llm_key_local" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="Leave empty if not required">
+                                            </div>
+                                            <button onclick="testLLM('local')" style="background:rgba(148,242,212,0.2);border:1px solid rgba(148,242,212,0.3);color:#6ee7b7;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:0.75rem;display:flex;align-items:center;gap:4px;align-self:flex-start;font-weight:500;">
+                                                <i class="fas fa-plug"></i> Test Local
+                                            </button>
+                                        </div>
                                     </div>
+
+                                    <!-- Cloud Ollama Configuration -->
                                     <div>
-                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Model</label>
-                                        <input type="text" id="set_llm_model" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="llama3.2">
+                                        <label style="color:#fbbf24;font-size:0.8rem;display:block;margin-bottom:8px;text-transform:uppercase;font-weight:600;">☁️ Cloud Ollama Configuration</label>
+                                        <div style="display:flex;flex-direction:column;gap:8px;">
+                                            <div>
+                                                <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">API URL</label>
+                                                <input type="text" id="set_llm_url_cloud" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="https://ollama.com/api">
+                                            </div>
+                                            <div>
+                                                <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Model</label>
+                                                <input type="text" id="set_llm_model_cloud" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="glm-5:cloud">
+                                            </div>
+                                            <div>
+                                                <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">API Key</label>
+                                                <input type="password" id="set_llm_key_cloud" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="Your cloud API key">
+                                            </div>
+                                            <button onclick="testLLM('cloud')" style="background:rgba(251,191,36,0.2);border:1px solid rgba(251,191,36,0.3);color:#fcd34d;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:0.75rem;display:flex;align-items:center;gap:4px;align-self:flex-start;font-weight:500;">
+                                                <i class="fas fa-plug"></i> Test Cloud
+                                            </button>
+                                        </div>
                                     </div>
-                                    <div>
-                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">API Key <span style="color:#6b7280;">(optional)</span></label>
-                                        <input type="password" id="set_llm_key" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="Leave empty if not required">
-                                    </div>
-                                    <button onclick="testLLM()" style="background:rgba(99,102,241,0.2);border:1px solid rgba(99,102,241,0.3);color:#818cf8;border-radius:6px;padding:8px 12px;cursor:pointer;font-size:0.8rem;display:flex;align-items:center;gap:6px;align-self:flex-start;">
-                                        <i class="fas fa-plug"></i> Test Connection
-                                    </button>
-                                    <div id="llmTestResult" style="display:none;font-size:0.8rem;padding:8px;border-radius:6px;"></div>
+
+                                    <div id="llmTestResult" style="display:none;font-size:0.8rem;padding:8px;border-radius:6px;margin-top:4px;"></div>
                                 </div>
                             </div>
 
@@ -1596,7 +1693,7 @@
                                     <div>
                                         <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Max Agent Iterations</label>
                                         <input type="number" id="set_max_iterations" class="input-field" style="width:120px;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" min="1" max="20" value="6">
-                                        <span style="color:#6b7280;font-size:0.7rem;margin-left:8px;">1-20 arası (araç zinciri derinliği)</span>
+                                        <span style="color:#6b7280;font-size:0.7rem;margin-left:8px;">Between 1-20 (tool chain depth)</span>
                                     </div>
                                     <div>
                                         <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Search Engine</label>
@@ -1720,7 +1817,7 @@
             const loadingId = 'loading-' + Date.now();
             messagesDiv.innerHTML += `<div class="agent-status" id="${loadingId}">
                 <i class="fas fa-brain pulse"></i>
-                <span>Agent düşünüyor...</span>
+                <span>Agent thinking...</span>
             </div>`;
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
 
@@ -1778,9 +1875,6 @@
             let toolCount = 0;
             let thinkCount = 0;
 
-            // De-duplicate consecutive thinking steps (only show unique ones)
-            let lastThinking = '';
-
             steps.forEach((step, i) => {
                 const toolIcons = {
                     'web_search': 'fa-search',
@@ -1801,8 +1895,7 @@
                 stepsContent += `<div class="agent-step">`;
 
                 // Show thinking (model's internal reasoning)
-                if (step.thinking && step.thinking !== lastThinking) {
-                    lastThinking = step.thinking;
+                if (step.thinking) {
                     thinkCount++;
                     const thinkId = stepsId + '-think-' + i;
                     const thinkPreview = step.thinking.length > 60 ? step.thinking.substring(0, 60) + '...' : step.thinking;
@@ -1854,11 +1947,11 @@
 
             return `<div class="agent-steps">
                 <div class="agent-steps-header" onclick="toggleSteps('${stepsId}')">
-                    <i class="fas fa-caret-right" id="${stepsId}-icon"></i>
+                    <i class="fas fa-caret-down" id="${stepsId}-icon"></i>
                     <i class="fas fa-robot"></i>
                     Agent: ${summary.join(', ')}
                 </div>
-                <div class="agent-steps-body" id="${stepsId}">
+                <div class="agent-steps-body open" id="${stepsId}">
                     ${stepsContent}
                 </div>
             </div>`;
@@ -2310,11 +2403,29 @@ sys.stderr = io.StringIO()
                     const s = data.settings;
                     cachedSettings = s;
                     const el = (id) => document.getElementById(id);
-                    if (el('set_llm_provider')) el('set_llm_provider').value = s.llm_provider || 'ollama';
-                    if (el('set_llm_url')) el('set_llm_url').value = s.llm_api_url || '';
-                    if (el('set_llm_model')) el('set_llm_model').value = s.llm_model || '';
-                    if (el('set_llm_key')) el('set_llm_key').value = s.llm_api_key_set ? s.llm_api_key_masked : '';
-                    if (el('set_llm_key')) el('set_llm_key').placeholder = s.llm_api_key_set ? 'Key is set (type to change)' : 'Leave empty if not required';
+
+                    // Active source selector
+                    const activeSource = s.llm_active_source || 'local';
+                    if (el('llm_source_local')) el('llm_source_local').checked = activeSource === 'local';
+                    if (el('llm_source_cloud')) el('llm_source_cloud').checked = activeSource === 'cloud';
+
+                    // Local Ollama fields
+                    if (el('set_llm_url_local')) el('set_llm_url_local').value = s.llm_api_url_local || '';
+                    if (el('set_llm_model_local')) el('set_llm_model_local').value = s.llm_model_local || '';
+                    if (el('set_llm_key_local')) {
+                        el('set_llm_key_local').value = s.llm_api_key_local_set ? s.llm_api_key_local_masked : '';
+                        el('set_llm_key_local').placeholder = s.llm_api_key_local_set ? 'Key is set (type to change)' : 'Leave empty if not required';
+                    }
+
+                    // Cloud Ollama fields
+                    if (el('set_llm_url_cloud')) el('set_llm_url_cloud').value = s.llm_api_url_cloud || '';
+                    if (el('set_llm_model_cloud')) el('set_llm_model_cloud').value = s.llm_model_cloud || '';
+                    if (el('set_llm_key_cloud')) {
+                        el('set_llm_key_cloud').value = s.llm_api_key_cloud_set ? s.llm_api_key_cloud_masked : '';
+                        el('set_llm_key_cloud').placeholder = s.llm_api_key_cloud_set ? 'Key is set (type to change)' : '';
+                    }
+
+                    // Other settings
                     if (el('set_max_iterations')) el('set_max_iterations').value = s.max_agent_iterations || 6;
                     if (el('set_search_engine')) el('set_search_engine').value = s.search_engine || 'duckduckgo';
                     if (el('set_shell_enabled')) {
@@ -2346,19 +2457,28 @@ sys.stderr = io.StringIO()
 
         async function saveSettings() {
             const el = (id) => document.getElementById(id);
+            const activeSource = document.querySelector('input[name="llm_source"]:checked')?.value || 'local';
+
             const payload = {
-                llm_provider: el('set_llm_provider')?.value,
-                llm_api_url: el('set_llm_url')?.value,
-                llm_model: el('set_llm_model')?.value,
+                llm_active_source: activeSource,
+                llm_api_url_local: el('set_llm_url_local')?.value,
+                llm_model_local: el('set_llm_model_local')?.value,
+                llm_api_url_cloud: el('set_llm_url_cloud')?.value,
+                llm_model_cloud: el('set_llm_model_cloud')?.value,
                 max_agent_iterations: parseInt(el('set_max_iterations')?.value) || 6,
                 search_engine: el('set_search_engine')?.value,
                 shell_enabled: el('set_shell_enabled')?.checked ?? true,
             };
 
-            // Only send API key if user typed a new one (not the masked value)
-            const keyVal = el('set_llm_key')?.value || '';
-            if (keyVal && !keyVal.includes('••')) {
-                payload.llm_api_key = keyVal;
+            // Only send API keys if user typed a new one (not the masked value)
+            const keyValLocal = el('set_llm_key_local')?.value || '';
+            if (keyValLocal && !keyValLocal.includes('••')) {
+                payload.llm_api_key_local = keyValLocal;
+            }
+
+            const keyValCloud = el('set_llm_key_cloud')?.value || '';
+            if (keyValCloud && !keyValCloud.includes('••')) {
+                payload.llm_api_key_cloud = keyValCloud;
             }
 
             // Only send admin password if user typed one
@@ -2384,15 +2504,17 @@ sys.stderr = io.StringIO()
             }
         }
 
-        async function testLLM() {
+        async function testLLM(source) {
             const resultDiv = document.getElementById('llmTestResult');
             if (!resultDiv) return;
             resultDiv.style.display = 'block';
             resultDiv.style.background = 'rgba(99,102,241,0.1)';
             resultDiv.style.color = '#a5b4fc';
-            resultDiv.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing connection...';
 
-            // Save settings first so the test uses current values
+            const sourceLabel = source === 'cloud' ? 'Cloud' : 'Local';
+            resultDiv.innerHTML = `<i class="fas fa-spinner fa-spin"></i> Testing ${sourceLabel} connection...`;
+
+            // Save settings first
             await saveSettings();
 
             try {
@@ -2402,16 +2524,16 @@ sys.stderr = io.StringIO()
                 if (data.success) {
                     resultDiv.style.background = 'rgba(34,197,94,0.1)';
                     resultDiv.style.color = '#86efac';
-                    resultDiv.innerHTML = '<i class="fas fa-check-circle"></i> Connection OK! Response: ' + escapeHtml((data.response || '').substring(0, 100));
+                    resultDiv.innerHTML = `<i class="fas fa-check-circle"></i> ${sourceLabel} Connection OK! Response: ` + escapeHtml((data.response || '').substring(0, 100));
                 } else {
                     resultDiv.style.background = 'rgba(239,68,68,0.1)';
                     resultDiv.style.color = '#fca5a5';
-                    resultDiv.innerHTML = '<i class="fas fa-times-circle"></i> Failed: ' + escapeHtml((data.response || 'Connection error').substring(0, 200));
+                    resultDiv.innerHTML = `<i class="fas fa-times-circle"></i> ${sourceLabel} Failed: ` + escapeHtml((data.response || 'Connection error').substring(0, 200));
                 }
             } catch (e) {
                 resultDiv.style.background = 'rgba(239,68,68,0.1)';
                 resultDiv.style.color = '#fca5a5';
-                resultDiv.innerHTML = '<i class="fas fa-times-circle"></i> Error: ' + e.message;
+                resultDiv.innerHTML = `<i class="fas fa-times-circle"></i> ${sourceLabel} Error: ` + e.message;
             }
         }
 

@@ -30,11 +30,29 @@ struct User {
 /// Persistent settings stored in data/settings.json
 #[derive(Clone, Serialize, Deserialize)]
 struct Settings {
+    // Local Ollama configuration
+    llm_api_url_local: String,
+    llm_model_local: String,
+    llm_api_key_local: String,
+
+    // Cloud Ollama configuration
+    llm_api_url_cloud: String,
+    llm_model_cloud: String,
+    llm_api_key_cloud: String,
+
+    // Active source selection
+    llm_active_source: String,  // "local" or "cloud"
+
+    // Legacy fields (kept for backward compatibility)
+    #[serde(default)]
     llm_api_url: String,
+    #[serde(default)]
     llm_model: String,
+    #[serde(default)]
     llm_api_key: String,
-    /// "ollama" | "openai" | "custom"
+    #[serde(default)]
     llm_provider: String,
+
     search_engine: String,
     max_agent_iterations: usize,
     shell_enabled: bool,
@@ -44,6 +62,27 @@ struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            // Local Ollama (default)
+            llm_api_url_local: std::env::var("LLM_API_URL_LOCAL")
+                .unwrap_or_else(|_| "http://localhost:11434/api".to_string()),
+            llm_model_local: std::env::var("LLM_MODEL_LOCAL")
+                .unwrap_or_else(|_| "llama3.2".to_string()),
+            llm_api_key_local: std::env::var("LLM_API_KEY_LOCAL")
+                .unwrap_or_default(),
+
+            // Cloud Ollama
+            llm_api_url_cloud: std::env::var("LLM_API_URL_CLOUD")
+                .unwrap_or_else(|_| "https://ollama.com/api".to_string()),
+            llm_model_cloud: std::env::var("LLM_MODEL_CLOUD")
+                .unwrap_or_else(|_| "glm-5:cloud".to_string()),
+            llm_api_key_cloud: std::env::var("LLM_API_KEY_CLOUD")
+                .unwrap_or_default(),
+
+            // Active source (default to local)
+            llm_active_source: std::env::var("LLM_ACTIVE_SOURCE")
+                .unwrap_or_else(|_| "local".to_string()),
+
+            // Legacy fields (for backward compatibility)
             llm_api_url: std::env::var("LLM_API_URL")
                 .or_else(|_| std::env::var("OLLAMA_API_URL"))
                 .unwrap_or_else(|_| "http://localhost:11434/api".to_string()),
@@ -53,6 +92,7 @@ impl Default for Settings {
                 .or_else(|_| std::env::var("OLLAMA_API_KEY"))
                 .unwrap_or_default(),
             llm_provider: "ollama".to_string(),
+
             search_engine: "duckduckgo".to_string(),
             max_agent_iterations: 6,
             shell_enabled: true,
@@ -75,9 +115,16 @@ fn save_settings(settings: &Settings) {
     std::fs::write(SETTINGS_PATH, serde_json::to_string_pretty(settings).unwrap_or_default()).ok();
 }
 
+#[derive(Clone)]
+struct Session {
+    token: String,
+    username: String,
+}
+
 struct AppState {
     users: Mutex<HashMap<String, User>>,
     settings: Mutex<Settings>,
+    sessions: Mutex<HashMap<String, Session>>,  // token -> Session
 }
 
 #[derive(Serialize)]
@@ -152,6 +199,11 @@ fn hash_password(password: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(password.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn get_session_username(data: &web::Data<AppState>, token: &str) -> Option<String> {
+    let sessions = data.sessions.lock().unwrap();
+    sessions.get(token).map(|s| s.username.clone())
 }
 
 fn get_user_dir(username: &str) -> String {
@@ -665,7 +717,12 @@ async fn do_web_search(client: &reqwest::Client, query: &str, max_results: usize
 
 /// Ollama Cloud web search API (requires API key from ollama.com)
 async fn do_ollama_web_search(client: &reqwest::Client, query: &str, max_results: usize, settings: &Settings) -> Vec<SearchResult> {
-    let api_key = &settings.llm_api_key;
+    // Use API key from active source
+    let api_key = match settings.llm_active_source.as_str() {
+        "cloud" => &settings.llm_api_key_cloud,
+        _ => &settings.llm_api_key_local,
+    };
+
     if api_key.is_empty() {
         eprintln!("[Search] Ollama web search requires API key. Falling back to DuckDuckGo.");
         return do_duckduckgo_search(client, query, max_results).await;
@@ -1060,7 +1117,12 @@ async fn do_web_fetch(client: &reqwest::Client, url: &str) -> Result<String, Str
     let settings = current_settings();
 
     // Use Ollama Cloud web fetch if configured
-    if settings.search_engine == "ollama" && !settings.llm_api_key.is_empty() {
+    let api_key = match settings.llm_active_source.as_str() {
+        "cloud" => &settings.llm_api_key_cloud,
+        _ => &settings.llm_api_key_local,
+    };
+
+    if settings.search_engine == "ollama" && !api_key.is_empty() {
         match do_ollama_web_fetch(client, url, &settings).await {
             Ok(content) => return Ok(content),
             Err(e) => eprintln!("[Fetch] Ollama fetch failed ({}), trying direct fetch", e),
@@ -1072,11 +1134,17 @@ async fn do_web_fetch(client: &reqwest::Client, url: &str) -> Result<String, Str
 
 /// Ollama Cloud web fetch API
 async fn do_ollama_web_fetch(client: &reqwest::Client, url: &str, settings: &Settings) -> Result<String, String> {
+    // Use API key from active source
+    let api_key = match settings.llm_active_source.as_str() {
+        "cloud" => &settings.llm_api_key_cloud,
+        _ => &settings.llm_api_key_local,
+    };
+
     let body = serde_json::json!({"url": url});
 
     let res = client
         .post("https://ollama.com/api/web_fetch")
-        .header("Authorization", format!("Bearer {}", settings.llm_api_key))
+        .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&body)
         .timeout(std::time::Duration::from_secs(20))
@@ -1129,9 +1197,23 @@ async fn call_llm_chat(
     model: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let settings = current_settings();
-    let api_url = &settings.llm_api_url;
-    let model = model.unwrap_or(&settings.llm_model);
-    let api_key = &settings.llm_api_key;
+
+    // Select config based on active source
+    let (api_url, llm_model, api_key) = match settings.llm_active_source.as_str() {
+        "cloud" => (
+            settings.llm_api_url_cloud.as_str(),
+            model.unwrap_or(&settings.llm_model_cloud),
+            settings.llm_api_key_cloud.as_str(),
+        ),
+        _ => {
+            // Default to local
+            (
+                settings.llm_api_url_local.as_str(),
+                model.unwrap_or(&settings.llm_model_local),
+                settings.llm_api_key_local.as_str(),
+            )
+        }
+    };
 
     // Build chat endpoint URL
     // Ollama (local or cloud) uses /chat, OpenAI uses /chat/completions
@@ -1148,10 +1230,15 @@ async fn call_llm_chat(
     };
 
     let mut body = serde_json::json!({
-        "model": model,
+        "model": llm_model,
         "messages": messages,
         "stream": false
     });
+
+    // Disable thinking for local models to speed up responses
+    if settings.llm_active_source == "local" {
+        body["think"] = serde_json::json!(false);
+    }
 
     if let Some(tools) = tools {
         if !tools.is_empty() {
@@ -1272,9 +1359,24 @@ async fn login(data: web::Data<AppState>, body: web::Json<LoginRequest>) -> impl
     let users = data.users.lock().unwrap();
     match users.get(&body.username) {
         Some(user) if user.password_hash == hash_password(&body.password) => {
+            let username = user.username.clone();
+            drop(users);  // Release lock before acquiring sessions lock
+
+            // Generate token
+            let token = Uuid::new_v4().to_string();
+            let session = Session {
+                token: token.clone(),
+                username: username.clone(),
+            };
+
+            // Store session
+            let mut sessions = data.sessions.lock().unwrap();
+            sessions.insert(token.clone(), session);
+
             HttpResponse::Ok().json(serde_json::json!({
                 "success": true,
-                "user": { "username": user.username }
+                "token": token,
+                "user": { "username": username }
             }))
         }
         _ => HttpResponse::Unauthorized().json(serde_json::json!({
@@ -1284,8 +1386,33 @@ async fn login(data: web::Data<AppState>, body: web::Json<LoginRequest>) -> impl
 }
 
 #[post("/api/logout")]
-async fn logout() -> impl Responder {
+async fn logout(data: web::Data<AppState>, req: actix_web::HttpRequest) -> impl Responder {
+    // Extract token from Authorization header
+    if let Some(auth_header) = req.headers().get("Authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if let Some(token) = auth_str.strip_prefix("Bearer ") {
+                let mut sessions = data.sessions.lock().unwrap();
+                sessions.remove(token);
+            }
+        }
+    }
     HttpResponse::Ok().json(serde_json::json!({ "success": true }))
+}
+
+#[post("/api/validate-token")]
+async fn validate_token(data: web::Data<AppState>, req: actix_web::HttpRequest) -> impl Responder {
+    // Extract token from Authorization header
+    if let Some(auth_header) = req.headers().get("Authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if let Some(token) = auth_str.strip_prefix("Bearer ") {
+                let sessions = data.sessions.lock().unwrap();
+                if sessions.contains_key(token) {
+                    return HttpResponse::Ok().json(serde_json::json!({ "valid": true }));
+                }
+            }
+        }
+    }
+    HttpResponse::Unauthorized().json(serde_json::json!({ "valid": false }))
 }
 
 // ============================================================
@@ -2495,12 +2622,14 @@ async fn agent_chat(body: web::Json<AgentRequest>) -> impl Responder {
     }
 
     // Continue tool calling loop for remaining iterations
-    for _iteration in 1..max_iterations {
+    for iteration in 1..max_iterations {
+        eprintln!("[Agent] Iteration {}/{}: Calling LLM...", iteration, max_iterations - 1);
         let llm_result = call_llm_chat(&client, &messages, Some(&tool_defs), model).await;
 
         let response_json = match llm_result {
             Ok(json) => json,
             Err(e) => {
+                eprintln!("[Agent] ❌ LLM Error: {}", e);
                 return HttpResponse::Ok().json(serde_json::json!({
                     "success": false,
                     "answer": format!("LLM Error: {}", e),
@@ -2511,11 +2640,18 @@ async fn agent_chat(body: web::Json<AgentRequest>) -> impl Responder {
 
         let message = match response_json.get("message") {
             Some(m) => m.clone(),
-            None => break,
+            None => {
+                eprintln!("[Agent] No message in response, breaking loop");
+                break;
+            }
         };
 
         let (content, thinking) = extract_content(&message);
         let tool_calls = message.get("tool_calls").and_then(|tc| tc.as_array()).cloned();
+
+        if let Some(ref t) = thinking {
+            eprintln!("[Agent] 💭 Thinking: {}", safe_truncate(t, 100));
+        }
 
         if tool_calls.is_none() || tool_calls.as_ref().map_or(true, |tc| tc.is_empty()) {
             if thinking.is_some() {
@@ -2530,9 +2666,10 @@ async fn agent_chat(body: web::Json<AgentRequest>) -> impl Responder {
         }
 
         let tool_calls = tool_calls.unwrap();
+        eprintln!("[Agent] 🔧 Calling {} tool(s)...", tool_calls.len());
         messages.push(message.clone());
 
-        for tc in &tool_calls {
+        for (idx, tc) in tool_calls.iter().enumerate() {
             let func = tc.get("function").unwrap_or(tc);
             let tool_name = func.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
             let arguments = func.get("arguments").cloned().unwrap_or(serde_json::json!({}));
@@ -2542,7 +2679,9 @@ async fn agent_chat(body: web::Json<AgentRequest>) -> impl Responder {
                 serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string())
             };
 
+            eprintln!("[Agent]   [{}/{}] Executing: {} {}", idx + 1, tool_calls.len(), tool_name, safe_truncate(&args_str, 80));
             let observation = execute_tool(tool_name, &args_str, username, &client).await;
+            eprintln!("[Agent]   ✓ Result: {}", safe_truncate(&observation, 100));
 
             steps.push(AgentStep {
                 thinking: thinking.clone(),
@@ -2751,22 +2890,40 @@ async fn save_custom_tool(body: web::Json<serde_json::Value>) -> impl Responder 
 #[get("/api/settings")]
 async fn get_settings() -> impl Responder {
     let settings = current_settings();
-    let masked_key = if settings.llm_api_key.is_empty() {
+
+    // Mask local API key
+    let masked_key_local = if settings.llm_api_key_local.is_empty() {
         String::new()
-    } else if settings.llm_api_key.len() <= 8 {
+    } else if settings.llm_api_key_local.len() <= 8 {
         "--------".to_string()
     } else {
-        format!("{}--------{}", &settings.llm_api_key[..4], &settings.llm_api_key[settings.llm_api_key.len()-4..])
+        format!("{}--------{}", &settings.llm_api_key_local[..4], &settings.llm_api_key_local[settings.llm_api_key_local.len()-4..])
+    };
+
+    // Mask cloud API key
+    let masked_key_cloud = if settings.llm_api_key_cloud.is_empty() {
+        String::new()
+    } else if settings.llm_api_key_cloud.len() <= 8 {
+        "--------".to_string()
+    } else {
+        format!("{}--------{}", &settings.llm_api_key_cloud[..4], &settings.llm_api_key_cloud[settings.llm_api_key_cloud.len()-4..])
     };
 
     HttpResponse::Ok().json(serde_json::json!({
         "success": true,
         "settings": {
-            "llm_api_url": settings.llm_api_url,
-            "llm_model": settings.llm_model,
-            "llm_api_key_masked": masked_key,
-            "llm_api_key_set": !settings.llm_api_key.is_empty(),
-            "llm_provider": settings.llm_provider,
+            "llm_api_url_local": settings.llm_api_url_local,
+            "llm_model_local": settings.llm_model_local,
+            "llm_api_key_local_masked": masked_key_local,
+            "llm_api_key_local_set": !settings.llm_api_key_local.is_empty(),
+
+            "llm_api_url_cloud": settings.llm_api_url_cloud,
+            "llm_model_cloud": settings.llm_model_cloud,
+            "llm_api_key_cloud_masked": masked_key_cloud,
+            "llm_api_key_cloud_set": !settings.llm_api_key_cloud.is_empty(),
+
+            "llm_active_source": settings.llm_active_source,
+
             "search_engine": settings.search_engine,
             "max_agent_iterations": settings.max_agent_iterations,
             "shell_enabled": settings.shell_enabled,
@@ -2779,6 +2936,36 @@ async fn get_settings() -> impl Responder {
 async fn update_settings(data: web::Data<AppState>, body: web::Json<serde_json::Value>) -> impl Responder {
     let mut settings = data.settings.lock().unwrap();
 
+    // Local Ollama configuration
+    if let Some(v) = body.get("llm_api_url_local").and_then(|v| v.as_str()) {
+        if !v.is_empty() { settings.llm_api_url_local = v.to_string(); }
+    }
+    if let Some(v) = body.get("llm_model_local").and_then(|v| v.as_str()) {
+        if !v.is_empty() { settings.llm_model_local = v.to_string(); }
+    }
+    if let Some(v) = body.get("llm_api_key_local").and_then(|v| v.as_str()) {
+        if !v.contains("--") { settings.llm_api_key_local = v.to_string(); }
+    }
+
+    // Cloud Ollama configuration
+    if let Some(v) = body.get("llm_api_url_cloud").and_then(|v| v.as_str()) {
+        if !v.is_empty() { settings.llm_api_url_cloud = v.to_string(); }
+    }
+    if let Some(v) = body.get("llm_model_cloud").and_then(|v| v.as_str()) {
+        if !v.is_empty() { settings.llm_model_cloud = v.to_string(); }
+    }
+    if let Some(v) = body.get("llm_api_key_cloud").and_then(|v| v.as_str()) {
+        if !v.contains("--") { settings.llm_api_key_cloud = v.to_string(); }
+    }
+
+    // Active source selection
+    if let Some(v) = body.get("llm_active_source").and_then(|v| v.as_str()) {
+        if v == "local" || v == "cloud" {
+            settings.llm_active_source = v.to_string();
+        }
+    }
+
+    // Legacy fields (kept for backward compatibility)
     if let Some(v) = body.get("llm_api_url").and_then(|v| v.as_str()) {
         if !v.is_empty() { settings.llm_api_url = v.to_string(); }
     }
@@ -2819,7 +3006,7 @@ async fn update_settings(data: web::Data<AppState>, body: web::Json<serde_json::
 #[post("/api/settings/test_llm")]
 async fn test_llm() -> impl Responder {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(60))
         .build()
         .unwrap_or_default();
 
@@ -2861,6 +3048,7 @@ async fn main() -> std::io::Result<()> {
     let app_state = web::Data::new(AppState {
         users: Mutex::new(HashMap::new()),
         settings: Mutex::new(settings.clone()),
+        sessions: Mutex::new(HashMap::new()),
     });
 
     app_state.users.lock().unwrap().insert("admin".to_string(), User {
@@ -2885,6 +3073,7 @@ async fn main() -> std::io::Result<()> {
             .service(signup)
             .service(login)
             .service(logout)
+            .service(validate_token)
             .service(list_files)
             .service(create_item)
             .service(delete_items)
