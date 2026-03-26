@@ -1546,14 +1546,11 @@
             } else {
                 html += files.map((file, i) => {
                     const filePath = currentPath ? `${currentPath}/${file.name}` : file.name;
-                    const dnd = file.is_dir
-                        ? `ondragover="onItemDragOver(event,true)" ondragleave="onItemDragLeave(event)" ondrop="onItemDrop(event,'${filePath}',null,null,null)"`
-                        : '';
                     return `<div class="file-item ${selectedItems.includes(i) ? 'selected' : ''}"
                          draggable="true"
-                         ondragstart="onFileDragStart(event,'${filePath}','${file.name}')"
-                         ondragend="onFileDragEnd(event)"
-                         ${dnd}
+                         data-dnd-path="${filePath}"
+                         data-dnd-name="${file.name}"
+                         data-dnd-isdir="${file.is_dir}"
                          onclick="selectItem(event, ${i})"
                          ondblclick="openFile('${filePath}', ${file.is_dir}, '${file.name}')">
                         <i class="fas ${file.is_dir ? 'fa-folder text-yellow-400' : getFileIcon(file.name)}"></i>
@@ -1562,8 +1559,9 @@
                 }).join('');
             }
             grid.innerHTML = html;
+            attachGridDragDrop(grid, () => currentPath, () => loadFiles(currentPath));
         }
-        
+
         // Render desktop
         function renderDesktop() {
             const container = document.getElementById('desktopIcons');
@@ -3639,14 +3637,11 @@ sys.stderr = io.StringIO()
                     const fullPath = path ? `${path}/${f.name}` : f.name;
                     const icon = f.is_dir ? 'fa-folder text-yellow-400' : getFileIcon(f.name);
                     const dblclick = f.is_dir ? `renderFolderInWindow('${wid}','${fullPath}','${rootPath}')` : `openFile('${fullPath}', false, '${f.name}')`;
-                    const dnd = f.is_dir
-                        ? `ondragover="onItemDragOver(event,true)" ondragleave="onItemDragLeave(event)" ondrop="onItemDrop(event,'${fullPath}','${wid}','${path}','${rootPath}')"`
-                        : '';
                     return `<div class="file-item folder-win-item"
                          draggable="true"
-                         ondragstart="onFileDragStart(event,'${fullPath}','${f.name}')"
-                         ondragend="onFileDragEnd(event)"
-                         ${dnd}
+                         data-dnd-path="${fullPath}"
+                         data-dnd-name="${f.name}"
+                         data-dnd-isdir="${f.is_dir}"
                          onclick="selectFolderItem(this)"
                          ondblclick="${dblclick}"
                          oncontextmenu="event.stopPropagation();event.preventDefault();setFolderContext('${fullPath}','${f.name}',${f.is_dir},'${wid}','${path}','${rootPath}',event)"
@@ -3660,6 +3655,8 @@ sys.stderr = io.StringIO()
                 }).join('');
                 if (!html) html = '<div style="grid-column:1/-1;text-align:center;color:#6b7280;padding:20px;">Folder is empty</div>';
                 grid.innerHTML = html;
+                // Attach drag events (overwrites previous listeners via new grid reference after innerHTML)
+                attachGridDragDrop(grid, () => path, () => window.renderFolderInWindow(wid, path, rootPath));
             };
 
             createWindow(winId, `📁 ${folderName}`, `
@@ -3678,63 +3675,98 @@ sys.stderr = io.StringIO()
             el.classList.add('selected');
         }
 
-        /* ── Drag & Drop ── */
-        let _draggedFile = null; // { path, name, sourceGrid }
+        /* ══════════════════════════════════════════
+           Drag & Drop — event delegation on grids
+           ══════════════════════════════════════════ */
+        let _draggedFile = null; // { path, name, refreshSource }
 
-        function onFileDragStart(event, filePath, fileName) {
-            _draggedFile = { path: filePath, name: fileName, sourceGrid: event.currentTarget.closest('.file-grid') };
-            event.dataTransfer.effectAllowed = 'move';
-            event.dataTransfer.setData('text/plain', filePath);
-            event.currentTarget.classList.add('dragging');
-        }
-
-        function onFileDragEnd(event) {
-            event.currentTarget.classList.remove('dragging');
-            document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
-        }
-
-        function onItemDragOver(event, isDir) {
+        async function _doDrop(destPath, refreshDest) {
             if (!_draggedFile) return;
-            if (!isDir) return; // only accept drops on folders
-            event.preventDefault();
-            event.dataTransfer.dropEffect = 'move';
-            event.currentTarget.classList.add('drag-over');
-        }
-
-        function onItemDragLeave(event) {
-            event.currentTarget.classList.remove('drag-over');
-        }
-
-        async function onItemDrop(event, destFolderPath, wid, curPath, rootPath) {
-            event.preventDefault();
-            event.currentTarget.classList.remove('drag-over');
-            if (!_draggedFile) return;
-
-            const src = _draggedFile.path;
-            const dest = `${destFolderPath}/${_draggedFile.name}`;
+            const src  = _draggedFile.path;
+            const dest = destPath ? `${destPath}/${_draggedFile.name}` : _draggedFile.name;
+            const refreshSrc = _draggedFile.refreshSource;
             _draggedFile = null;
 
-            if (src === dest) return;
+            if (src === dest || dest.startsWith(src + '/')) return;
 
             const username = currentUser?.username || 'guest';
             try {
                 const res = await fetch(`${API}/files/rename`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}` },
+                    headers: { 'Content-Type': 'application/json',
+                               'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}` },
                     body: JSON.stringify({ username, old_name: src, new_name: dest })
                 });
                 const data = await res.json();
                 if (data.success) {
-                    showToast(`Moved to ${destFolderPath.split('/').pop()}`, 'success');
-                    loadFiles(currentPath);
-                    // Refresh current folder (where file came from), not destination
-                    if (wid && rootPath) window.renderFolderInWindow(wid, curPath || rootPath, rootPath);
+                    showToast(`Moved to ${destPath ? destPath.split('/').pop() : 'root'}`, 'success');
+                    if (refreshSrc) refreshSrc();
+                    if (refreshDest) refreshDest();
+                    loadFiles(currentPath); // always sync main grid
                 } else {
                     showToast(data.error || 'Move failed', 'error');
                 }
-            } catch (e) {
-                showToast('Move failed', 'error');
-            }
+            } catch (e) { showToast('Move failed', 'error'); }
+        }
+
+        /* Attach drag-and-drop events to any .file-grid element.
+           curDirPath  = the folder this grid is currently showing
+           refreshFn   = called after a successful drop that affects this grid */
+        function attachGridDragDrop(gridEl, getCurDirPath, refreshFn) {
+            // dragstart — item inside this grid starts being dragged
+            gridEl.addEventListener('dragstart', (e) => {
+                const item = e.target.closest('[data-dnd-path]');
+                if (!item) return;
+                _draggedFile = {
+                    path: item.dataset.dndPath,
+                    name: item.dataset.dndName,
+                    refreshSource: refreshFn
+                };
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', item.dataset.dndPath);
+                item.classList.add('dragging');
+                e.stopPropagation();
+            });
+
+            // dragend — clean up classes
+            gridEl.addEventListener('dragend', () => {
+                document.querySelectorAll('.dragging, .drag-over').forEach(el => {
+                    el.classList.remove('dragging', 'drag-over');
+                });
+            });
+
+            // dragover — highlight folder targets and allow drop on empty space
+            gridEl.addEventListener('dragover', (e) => {
+                if (!_draggedFile) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                // Highlight only folder items
+                const folder = e.target.closest('[data-dnd-isdir="true"]');
+                gridEl.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+                if (folder && folder.dataset.dndPath !== _draggedFile?.path) {
+                    folder.classList.add('drag-over');
+                }
+            });
+
+            // dragleave — clear highlights when leaving grid
+            gridEl.addEventListener('dragleave', (e) => {
+                if (!gridEl.contains(e.relatedTarget)) {
+                    gridEl.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+                }
+            });
+
+            // drop — onto a folder icon OR onto empty grid space
+            gridEl.addEventListener('drop', (e) => {
+                e.preventDefault();
+                const folder = e.target.closest('[data-dnd-isdir="true"]');
+                gridEl.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+                if (folder && folder.dataset.dndPath !== _draggedFile?.path) {
+                    _doDrop(folder.dataset.dndPath, refreshFn);
+                } else if (!folder) {
+                    // Drop on empty grid space → move to this grid's current directory
+                    _doDrop(getCurDirPath(), refreshFn);
+                }
+            });
         }
 
         async function deleteFolderItem(fullPath, wid, currentPath, rootPath) {
