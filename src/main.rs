@@ -246,6 +246,8 @@ struct AgentRequest {
     username: Option<String>,
     #[serde(default)]
     share_key: Option<String>,
+    #[serde(default)]
+    conv_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1950,11 +1952,11 @@ async fn chat(body: web::Json<ChatRequest>) -> impl Responder {
 // ============================================================
 
 /// Build the system message for the agent
-fn build_system_prompt(username: &str) -> String {
+fn build_system_prompt(username: &str, conv_id: &str) -> String {
     let now = chrono::Utc::now();
     format!(
         r#"You are Puterra AI, an advanced agentic assistant inside Puterra Cloud OS.
-Current date: {}. User: {}.
+Current date: {}. User: {}. Conversation ID: {}.
 
 You have access to tools for web search, file operations, code execution, memory, and more.
 Use tools when you need real-time data, file operations, or system actions.
@@ -1985,7 +1987,7 @@ Tool Reuse Strategy:
 For ANY task with 3+ steps, or that involves research, writing, data collection, or file creation:
 
 **At the START of the task:**
-1. Create a task folder: `tasks/YYYY-MM-DD-short-task-slug/`  (e.g. `tasks/2024-01-15-istanbul-guide/`)
+1. Create a task folder using YOUR Conversation ID as prefix: `tasks/CONV_ID-short-task-slug/`  (e.g. `tasks/{}-istanbul-guide/`)
 2. Write `tasks/FOLDER/plan.md` containing:
    - ## Goal: what the user wants
    - ## Steps: numbered list of every step needed
@@ -2011,7 +2013,9 @@ For ANY task with 3+ steps, or that involves research, writing, data collection,
 
 This ensures long tasks survive errors, restarts, and context limits."#,
         now.format("%Y-%m-%d %H:%M UTC"),
-        username
+        username,
+        conv_id,
+        conv_id
     )
 }
 
@@ -2654,10 +2658,10 @@ async fn execute_tool(
 }
 
 /// Build a ReAct-style system prompt (fallback for models without native tool calling)
-fn build_react_system_prompt(username: &str) -> String {
+fn build_react_system_prompt(username: &str, conv_id: &str) -> String {
     let now = chrono::Utc::now();
     format!(r#"You are Puterra AI, an advanced agentic assistant inside Puterra Cloud OS.
-Current date: {}. User: {}.
+Current date: {}. User: {}. Conversation ID: {}.
 
 You have access to powerful tools. You MUST use tools when you need real-time information, file operations, or any action.
 
@@ -2715,7 +2719,7 @@ Final Answer: [your complete answer with markdown formatting]
 
 For ANY task with 3+ steps (research, writing, data collection, file creation):
 
-**START of task:** Create `tasks/YYYY-MM-DD-slug/plan.md` with goal + step list.
+**START of task:** Create `tasks/CONV_ID-slug/plan.md` using YOUR Conversation ID (e.g. `tasks/{}-istanbul-guide/`).
 
 **After EACH step:** Update `tasks/FOLDER/progress.md`:
 - ✅ done steps (with findings)
@@ -2727,7 +2731,7 @@ Save findings to `tasks/FOLDER/findings.md`, created files to `tasks/FOLDER/`.
 **On ERROR or RESUME:** Read `tasks/FOLDER/progress.md` → continue from last incomplete step. NEVER restart from scratch.
 
 **On COMPLETION:** Mark plan.md as ✅ Complete."#,
-        now.format("%Y-%m-%d %H:%M UTC"), username)
+        now.format("%Y-%m-%d %H:%M UTC"), username, conv_id, conv_id)
 }
 
 /// Parse ReAct-style response (fallback)
@@ -2769,12 +2773,13 @@ async fn agent_react_fallback(
     message: &str,
     history: &Option<Vec<AgentChatMessage>>,
     username: &str,
+    conv_id: &str,
     model: Option<&str>,
     share_key: Option<&ShareKey>,
     tx: &mpsc::Sender<String>,
     step_num: &mut usize,
 ) -> (bool, String) {
-    let system_prompt = build_react_system_prompt(username);
+    let system_prompt = build_react_system_prompt(username, conv_id);
     let settings = current_settings();
     let max_iterations = settings.max_agent_iterations;
 
@@ -2928,6 +2933,7 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
     let history = body.history.clone();
     let model = body.model.clone();
     let username = body.username.clone().unwrap_or_else(|| "guest".to_string());
+    let conv_id = body.conv_id.clone().unwrap_or_default();
 
     // Look up share key if provided — increment uses, validate active
     let share_key_opt: Option<ShareKey> = body.share_key.as_deref().and_then(|key_id| {
@@ -2951,7 +2957,7 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
     // Spawn the agent loop in a background task
     tokio::spawn(async move {
         let model_ref = model.as_deref();
-        let system_prompt = build_system_prompt(&username);
+        let system_prompt = build_system_prompt(&username, &conv_id);
         let tool_defs = build_tool_definitions(&username);
         let settings = current_settings();
         let max_iterations = settings.max_agent_iterations;
@@ -3001,7 +3007,7 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
         // ReAct fallback — streams events in real-time via tx
         if !native_works {
             let (success, answer) =
-                agent_react_fallback(&client, &message, &history, &username, model_ref, share_key_opt.as_ref(), &tx, &mut step_num).await;
+                agent_react_fallback(&client, &message, &history, &username, &conv_id, model_ref, share_key_opt.as_ref(), &tx, &mut step_num).await;
             let _ = tx.send(sse_event(&serde_json::json!({"type": "answer", "answer": answer, "success": success}))).await;
             let _ = tx.send(sse_event(&serde_json::json!({"type": "done"}))).await;
             return;

@@ -1501,7 +1501,7 @@
             closeChatSidebarOnMobile();
         }
 
-        function deleteConversation(id, event) {
+        async function deleteConversation(id, event) {
             event.stopPropagation();
             if (!confirm('Are you sure you want to delete this conversation?')) return;
             conversations = conversations.filter(c => c.id !== id);
@@ -1514,6 +1514,27 @@
                 }
             }
             renderConversationList();
+            // Delete associated task folders (tasks/CONV_ID-*)
+            try {
+                const token = localStorage.getItem('auth_token') || '';
+                const res = await fetch(`${API}/files/list`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token, path: 'tasks' })
+                });
+                const data = await res.json();
+                if (data.success && Array.isArray(data.files)) {
+                    const matching = data.files.filter(f => f.is_dir && f.name.startsWith(id + '-'));
+                    for (const f of matching) {
+                        await fetch(`${API}/files/delete`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ token, names: [`tasks/${f.name}`] })
+                        });
+                    }
+                    if (matching.length > 0) showToast(`Deleted ${matching.length} task folder(s)`, 'info');
+                }
+            } catch (_) {}
         }
 
         function saveActiveConversation() {
@@ -2364,6 +2385,7 @@
                         model: cachedSettings?.llm_model || undefined,
                         username: username,
                         share_key: cachedShareKey?.id || undefined,
+                        conv_id: activeConversationId || undefined,
                     })
                 });
 
