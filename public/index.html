@@ -384,6 +384,12 @@
             outline: none;
             font-family: inherit;
             min-width: 0;
+            resize: none;
+            min-height: 40px;
+            max-height: 160px;
+            overflow-y: auto;
+            line-height: 1.4;
+            display: block;
         }
         
         .chat-send {
@@ -500,6 +506,51 @@
             background: rgba(107, 114, 128, 0.05);
             border-radius: 4px;
             padding: 4px 8px;
+        }
+
+        .agent-steps-live {
+            background: rgba(99, 102, 241, 0.06);
+            border: 1px solid rgba(99, 102, 241, 0.15);
+            border-radius: 8px;
+            font-size: 0.8rem;
+        }
+
+        .folder-win-item .folder-item-actions { display:none; position:absolute; top:2px; right:2px; }
+        .folder-win-item:hover .folder-item-actions { display:flex; gap:2px; }
+        .folder-win-item:hover { background: rgba(99,102,241,0.15); }
+
+        .think-block {
+            margin: 3px 0;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        .think-block summary {
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 6px;
+            color: #c4b5fd;
+            font-size: 0.8rem;
+            list-style: none;
+            user-select: none;
+            border-radius: 6px;
+        }
+        .think-block summary:hover { background: rgba(167,139,250,0.08); }
+        .think-block summary::-webkit-details-marker { display: none; }
+        .think-block summary .think-caret { transition: transform 0.2s; font-size: 0.65rem; color: #a78bfa; }
+        .think-block[open] summary .think-caret { transform: rotate(90deg); }
+        .think-block .think-body {
+            margin: 4px 0 4px 20px;
+            color: #ddd6fe;
+            font-size: 0.78rem;
+            background: rgba(167,139,250,0.08);
+            padding: 8px 10px;
+            border-radius: 6px;
+            white-space: pre-wrap;
+            line-height: 1.5;
+            border-left: 2px solid #a78bfa;
+            word-break: break-word;
         }
 
         .agent-status {
@@ -937,6 +988,7 @@
     </div>
     
     <script>
+        console.error('[PUTERRA] index.html loaded at', new Date().toISOString());
         const API = '/api';
         let currentUser = null;
         let files = [];
@@ -947,6 +999,7 @@
         let cachedSettings = null;
         let conversations = []; // [{id, title, messages, html, created}]
         let activeConversationId = null;
+        let agentAbortController = null;
         
         // Toast
         function showToast(message, type = 'info') {
@@ -1201,6 +1254,7 @@
 
         function deleteConversation(id, event) {
             event.stopPropagation();
+            if (!confirm('Bu sohbeti silmek istediğinize emin misiniz?')) return;
             conversations = conversations.filter(c => c.id !== id);
             saveConversations();
             if (id === activeConversationId) {
@@ -1287,6 +1341,7 @@
 
         // Clear chat history (clears active conversation only)
         function clearChatHistory() {
+            if (!confirm('Sohbet geçmişini temizlemek istediğinize emin misiniz?')) return;
             chatHistory = [];
             const messagesDiv = document.getElementById('chatMessages');
             if (messagesDiv) {
@@ -1325,19 +1380,63 @@
         }
         
         // Load files
-        async function loadFiles() {
+        let currentPath = ''; // Current folder path in file browser
+        let folderContext = null; // {fullPath, name, isDir, wid, curPath, rootPath} - set when right-clicking in a folder window
+
+        async function loadFiles(path) {
+            if (path !== undefined) currentPath = path;
             const username = currentUser?.username || 'guest';
             try {
-                const res = await fetch(`${API}/files/${username}`);
+                const url = currentPath ? `${API}/files/${username}?path=${encodeURIComponent(currentPath)}` : `${API}/files/${username}`;
+                const res = await fetch(url);
                 const data = await res.json();
-                
                 if (data.success) {
                     files = data.files || [];
                     renderDesktop();
+                    renderFileGrid();
                 }
             } catch (e) {
                 showToast('Failed to load files', 'error');
             }
+        }
+
+        function renderFileGrid() {
+            const grid = document.getElementById('fileGrid');
+            if (!grid) return;
+
+            // Breadcrumb
+            const parts = currentPath ? currentPath.split('/') : [];
+            let breadcrumb = `<span onclick="loadFiles('')" style="cursor:pointer;color:#818cf8;">Ana Dizin</span>`;
+            parts.forEach((part, i) => {
+                const partPath = parts.slice(0, i + 1).join('/');
+                breadcrumb += ` <span style="color:#6b7280;">›</span> <span onclick="loadFiles('${partPath}')" style="cursor:pointer;color:#818cf8;">${part}</span>`;
+            });
+            const breadcrumbEl = document.getElementById('fileBreadcrumb');
+            if (breadcrumbEl) breadcrumbEl.innerHTML = breadcrumb;
+
+            let html = '';
+            if (currentPath) {
+                // Back button
+                const parentPath = currentPath.includes('/') ? currentPath.split('/').slice(0, -1).join('/') : '';
+                html += `<div class="file-item" ondblclick="loadFiles('${parentPath}')" style="opacity:0.7;">
+                    <i class="fas fa-arrow-left" style="color:#9ca3af;"></i>
+                    <span style="color:#9ca3af;">..</span>
+                </div>`;
+            }
+            if (files.length === 0 && !currentPath) {
+                html = '<div style="grid-column:1/-1;text-align:center;color:#6b7280;padding:40px;"><i class="fas fa-folder-open" style="font-size:3rem;margin-bottom:12px;opacity:0.3;"></i><p>No files yet</p></div>';
+            } else {
+                html += files.map((file, i) => {
+                    const filePath = currentPath ? `${currentPath}/${file.name}` : file.name;
+                    return `<div class="file-item ${selectedItems.includes(i) ? 'selected' : ''}"
+                         onclick="selectItem(event, ${i})"
+                         ondblclick="openFile('${filePath}', ${file.is_dir}, '${file.name}')">
+                        <i class="fas ${file.is_dir ? 'fa-folder text-yellow-400' : getFileIcon(file.name)}"></i>
+                        <span>${file.name}</span>
+                    </div>`;
+                }).join('');
+            }
+            grid.innerHTML = html;
         }
         
         // Render desktop
@@ -1464,18 +1563,13 @@
                             </button>
                         </div>
                     </div>
-                    <div class="file-grid" id="fileGrid">
-                        ${files.length === 0 ? '<div style="grid-column:1/-1;text-align:center;color:#6b7280;padding:40px;"><i class="fas fa-folder-open" style="font-size:3rem;margin-bottom:12px;opacity:0.3;"></i><p>No files yet</p><p style="font-size:0.75rem;margin-top:4px;">Right-click to create folders and files</p></div>' : ''}
-                        ${files.map((file, i) => `
-                            <div class="file-item ${selectedItems.includes(i) ? 'selected' : ''}" 
-                                 onclick="selectItem(event, ${i})"
-                                 ondblclick="openFile('${file.name}', ${file.is_dir})">
-                                <i class="fas ${file.is_dir ? 'fa-folder text-yellow-400' : getFileIcon(file.name)}"></i>
-                                <span>${file.name}</span>
-                            </div>
-                        `).join('')}
+                    <div id="fileBreadcrumb" style="font-size:0.75rem;margin-bottom:8px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.08);color:#818cf8;">
+                        <span onclick="loadFiles('')" style="cursor:pointer;">Ana Dizin</span>
                     </div>
+                    <div class="file-grid" id="fileGrid"></div>
                 `, 650, 450);
+                currentPath = '';
+                renderFileGrid();
             } else if (app === 'ai') {
                 createWindow('ai', '🤖 AI Assistant', `
                     <div class="chat-layout">
@@ -1496,8 +1590,8 @@
                                     </div>
                                 </div>
                                 <div class="chat-input-area">
-                                    <input type="text" class="chat-input" id="chatInput" placeholder="Ask anything..." onkeypress="if(event.key==='Enter')sendChat()">
-                                    <button class="chat-send" onclick="sendChat()">
+                                    <textarea class="chat-input" id="chatInput" placeholder="Ask anything... (Shift+Enter for new line)" rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}else if(event.key==='Enter'&&event.shiftKey){setTimeout(autoResizeChatInput,0);}" oninput="autoResizeChatInput()"></textarea>
+                                    <button class="chat-send" id="chatSendBtn" onclick="sendChat()">
                                         <i class="fas fa-paper-plane"></i>
                                     </button>
                                 </div>
@@ -1690,10 +1784,17 @@
                                     <i class="fas fa-robot"></i> Agent
                                 </h3>
                                 <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:10px;">
-                                    <div>
-                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Max Agent Iterations</label>
-                                        <input type="number" id="set_max_iterations" class="input-field" style="width:120px;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" min="1" max="20" value="6">
-                                        <span style="color:#6b7280;font-size:0.7rem;margin-left:8px;">Between 1-20 (tool chain depth)</span>
+                                    <div style="display:flex;gap:16px;flex-wrap:wrap;">
+                                        <div>
+                                            <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Max Iterations</label>
+                                            <input type="number" id="set_max_iterations" class="input-field" style="width:90px;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" min="1" max="20" value="6">
+                                            <div style="color:#6b7280;font-size:0.65rem;margin-top:2px;">1 – 20</div>
+                                        </div>
+                                        <div>
+                                            <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Chat Context Limit</label>
+                                            <input type="number" id="set_chat_context_limit" class="input-field" style="width:90px;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" min="1" max="50" value="10">
+                                            <div style="color:#6b7280;font-size:0.65rem;margin-top:2px;">messages remembered</div>
+                                        </div>
                                     </div>
                                     <div>
                                         <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Search Engine</label>
@@ -1701,6 +1802,72 @@
                                             <option value="duckduckgo">DuckDuckGo (Integrated)</option>
                                             <option value="ollama">Ollama Cloud (API Key required)</option>
                                         </select>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- LLM Generation Parameters -->
+                            <div>
+                                <h3 style="margin-bottom:10px;color:#a5b4fc;font-size:0.9rem;text-transform:uppercase;letter-spacing:1px;">
+                                    <i class="fas fa-sliders-h"></i> LLM Generation
+                                </h3>
+                                <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:10px;">
+                                    <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
+                                        <div>
+                                            <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Temperature</label>
+                                            <input type="number" id="set_llm_temperature" class="input-field" style="width:90px;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" min="0" max="2" step="0.1" value="0.7">
+                                            <div style="color:#6b7280;font-size:0.65rem;margin-top:2px;">0.0 (precise) – 2.0 (creative)</div>
+                                        </div>
+                                        <div>
+                                            <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Max Tokens</label>
+                                            <input type="number" id="set_llm_max_tokens" class="input-field" style="width:110px;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" min="256" max="32768" step="256" value="4096">
+                                            <div style="color:#6b7280;font-size:0.65rem;margin-top:2px;">256 – 32768</div>
+                                        </div>
+                                    </div>
+                                    <div style="display:flex;align-items:center;gap:10px;">
+                                        <label style="color:#9ca3af;font-size:0.85rem;flex:1;">
+                                            Force Thinking Mode <span style="color:#6b7280;font-size:0.7rem;">(cloud thinks by default; enable to force on local)</span>
+                                        </label>
+                                        <label style="position:relative;display:inline-block;width:44px;height:24px;cursor:pointer;">
+                                            <input type="checkbox" id="set_llm_think" style="display:none;">
+                                            <span class="toggle-slider" style="position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(255,255,255,0.1);border-radius:12px;transition:0.2s;"></span>
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Timeouts -->
+                            <div>
+                                <h3 style="margin-bottom:10px;color:#a5b4fc;font-size:0.9rem;text-transform:uppercase;letter-spacing:1px;">
+                                    <i class="fas fa-clock"></i> Timeouts <span style="color:#6b7280;font-weight:400;font-size:0.75rem;text-transform:none;">(seconds)</span>
+                                </h3>
+                                <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px;">
+                                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                                        <div>
+                                            <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Agent LLM Call</label>
+                                            <input type="number" id="set_timeout_agent" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" min="10" max="600" value="120">
+                                            <div style="color:#6b7280;font-size:0.65rem;margin-top:2px;">10 – 600 s</div>
+                                        </div>
+                                        <div>
+                                            <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Web Fetch</label>
+                                            <input type="number" id="set_timeout_web_fetch" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" min="5" max="120" value="15">
+                                            <div style="color:#6b7280;font-size:0.65rem;margin-top:2px;">5 – 120 s</div>
+                                        </div>
+                                        <div>
+                                            <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Web Search</label>
+                                            <input type="number" id="set_timeout_web_search" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" min="5" max="120" value="15">
+                                            <div style="color:#6b7280;font-size:0.65rem;margin-top:2px;">5 – 120 s</div>
+                                        </div>
+                                        <div>
+                                            <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Image Download</label>
+                                            <input type="number" id="set_timeout_image" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" min="5" max="120" value="30">
+                                            <div style="color:#6b7280;font-size:0.65rem;margin-top:2px;">5 – 120 s</div>
+                                        </div>
+                                        <div>
+                                            <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">LLM Connection Test</label>
+                                            <input type="number" id="set_timeout_llm_test" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" min="10" max="300" value="60">
+                                            <div style="color:#6b7280;font-size:0.65rem;margin-top:2px;">10 – 300 s</div>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -1725,6 +1892,44 @@
                                 </div>
                             </div>
 
+                            <!-- Share Keys -->
+                            <div>
+                                <h3 style="margin-bottom:10px;color:#a5b4fc;font-size:0.9rem;text-transform:uppercase;letter-spacing:1px;">
+                                    <i class="fas fa-key"></i> Share Keys
+                                    <span style="color:#6b7280;font-weight:400;font-size:0.75rem;text-transform:none;margin-left:6px;">Share LLM access without exposing your API key</span>
+                                </h3>
+                                <!-- Active share key input (for recipients) -->
+                                <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px;margin-bottom:10px;">
+                                    <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:6px;">Use a Share Key (paste a sk_... key)</label>
+                                    <div style="display:flex;gap:6px;">
+                                        <input type="text" id="active_share_key_input" class="input-field" style="flex:1;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="sk_...">
+                                        <button onclick="applyShareKey()" style="background:linear-gradient(135deg,#6366f1,#4f46e5);border:none;border-radius:6px;padding:8px 14px;color:#fff;cursor:pointer;font-size:0.82rem;white-space:nowrap;">Apply</button>
+                                        <button onclick="clearShareKey()" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:8px 10px;color:#9ca3af;cursor:pointer;font-size:0.82rem;">Clear</button>
+                                    </div>
+                                    <div id="active_share_key_info" style="margin-top:6px;font-size:0.75rem;color:#6b7280;"></div>
+                                </div>
+                                <!-- Create new share key -->
+                                <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px;margin-bottom:10px;">
+                                    <div style="color:#e5e7eb;font-size:0.82rem;font-weight:600;margin-bottom:8px;">Create New Share Key</div>
+                                    <div style="display:flex;flex-direction:column;gap:6px;">
+                                        <input type="text" id="sk_new_label" class="input-field" style="padding:7px 10px;border-radius:6px;color:#fff;font-size:0.82rem;" placeholder="Label (e.g. 'For Alice')">
+                                        <input type="url" id="sk_new_api_url" class="input-field" style="padding:7px 10px;border-radius:6px;color:#fff;font-size:0.82rem;" placeholder="API URL (leave blank to use current)">
+                                        <input type="text" id="sk_new_model" class="input-field" style="padding:7px 10px;border-radius:6px;color:#fff;font-size:0.82rem;" placeholder="Model (leave blank to use current)">
+                                        <input type="password" id="sk_new_api_key" class="input-field" style="padding:7px 10px;border-radius:6px;color:#fff;font-size:0.82rem;" placeholder="API Key (leave blank to use current)">
+                                        <div style="display:flex;gap:6px;align-items:center;">
+                                            <input type="number" id="sk_new_max_uses" class="input-field" style="width:100px;padding:7px 10px;border-radius:6px;color:#fff;font-size:0.82rem;" placeholder="Max uses" min="1">
+                                            <span style="color:#6b7280;font-size:0.75rem;">max uses (blank = unlimited)</span>
+                                            <button onclick="createShareKey()" style="margin-left:auto;background:linear-gradient(135deg,#22c55e,#16a34a);border:none;border-radius:6px;padding:8px 14px;color:#fff;cursor:pointer;font-size:0.82rem;white-space:nowrap;"><i class="fas fa-plus"></i> Create</button>
+                                        </div>
+                                    </div>
+                                </div>
+                                <!-- My share keys list -->
+                                <div id="share_keys_list" style="display:flex;flex-direction:column;gap:6px;">
+                                    <div style="color:#6b7280;font-size:0.8rem;text-align:center;padding:8px;">Loading share keys...</div>
+                                </div>
+                                <button onclick="loadShareKeys()" style="margin-top:6px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:6px 12px;color:#9ca3af;cursor:pointer;font-size:0.8rem;"><i class="fas fa-sync-alt"></i> Refresh</button>
+                            </div>
+
                             <!-- Save Button -->
                             <div style="display:flex;gap:8px;">
                                 <button onclick="saveSettings()" style="background:linear-gradient(135deg,#22c55e,#16a34a);border:none;border-radius:8px;padding:10px 24px;color:#fff;cursor:pointer;font-weight:600;font-size:0.85rem;display:flex;align-items:center;gap:6px;">
@@ -1737,7 +1942,7 @@
 
                         </div>
                     </div>
-                `, 500, 580);
+                `, 560, 640);
                 // Load current settings into the form
                 loadSettingsUI();
             }
@@ -1783,12 +1988,46 @@
             return result.join('<br>');
         }
         
+        function autoResizeChatInput() {
+            const el = document.getElementById('chatInput');
+            if (!el) return;
+            el.style.height = '40px';
+            el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+        }
+
         // Chat - uses the Agent endpoint with ReAct loop
+        function setChatSendBtn(mode) {
+            const btn = document.getElementById('chatSendBtn');
+            if (!btn) return;
+            if (mode === 'stop') {
+                btn.onclick = stopAgent;
+                btn.title = 'Stop';
+                btn.style.background = 'rgba(239,68,68,0.2)';
+                btn.style.borderColor = 'rgba(239,68,68,0.4)';
+                btn.innerHTML = '<i class="fas fa-stop"></i>';
+            } else {
+                btn.onclick = sendChat;
+                btn.title = '';
+                btn.style.background = '';
+                btn.style.borderColor = '';
+                btn.innerHTML = '<i class="fas fa-paper-plane"></i>';
+            }
+        }
+
+        function stopAgent() {
+            if (agentAbortController) {
+                agentAbortController.abort();
+                agentAbortController = null;
+            }
+        }
+
         async function sendChat() {
             const input = document.getElementById('chatInput');
             const message = input.value.trim();
             if (!message) return;
+            if (agentAbortController) return; // already running
             input.value = '';
+            input.style.height = '40px';
 
             // Handle special commands before adding to history
             if (/^(?:new chat|yeni sohbet)$/i.test(message)) {
@@ -1813,53 +2052,194 @@
             updateConversationTitle(message);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
 
-            // Add loading indicator
-            const loadingId = 'loading-' + Date.now();
-            messagesDiv.innerHTML += `<div class="agent-status" id="${loadingId}">
-                <i class="fas fa-brain pulse"></i>
-                <span>Agent thinking...</span>
+            const username = currentUser?.username || 'guest';
+
+            // Create streaming agent steps container
+            const stepsContainerId = 'agent-stream-' + Date.now();
+            messagesDiv.innerHTML += `<div class="agent-steps-live" id="${stepsContainerId}" style="margin-bottom:8px;">
+                <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;color:#a78bfa;font-size:0.8rem;">
+                    <i class="fas fa-brain pulse"></i>
+                    <span id="${stepsContainerId}-status">Agent thinking...</span>
+                </div>
+                <div id="${stepsContainerId}-steps" class="open" style="padding:0 12px 4px;"></div>
             </div>`;
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
 
-            const username = currentUser?.username || 'guest';
-
+            agentAbortController = new AbortController();
+            setChatSendBtn('stop');
             try {
-                // Call the agent endpoint
                 const res = await fetch(`${API}/agent`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
+                    signal: agentAbortController.signal,
                     body: JSON.stringify({
                         message: message,
-                        history: chatHistory.slice(-10),
+                        history: chatHistory.slice(-(cachedSettings?.chat_context_limit || 10)),
                         model: cachedSettings?.llm_model || undefined,
                         username: username,
+                        share_key: cachedShareKey?.id || undefined,
                     })
                 });
 
-                const data = await res.json();
-                document.getElementById(loadingId)?.remove();
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let finalAnswer = '';
+                let stepsArea = document.getElementById(stepsContainerId + '-steps');
+                let statusEl = document.getElementById(stepsContainerId + '-status');
+                let thinkCount = 0;
+                let toolCount = 0;
 
-                if (data.success || data.answer) {
-                    // Show agent steps if any
-                    if (data.steps && data.steps.length > 0) {
-                        const stepsHtml = renderAgentSteps(data.steps);
-                        messagesDiv.innerHTML += stepsHtml;
+                const toolIcons = {
+                    'web_search': 'fa-search', 'web_fetch': 'fa-globe', 'file_read': 'fa-file-alt',
+                    'file_write': 'fa-save', 'file_create': 'fa-file-plus', 'file_list': 'fa-folder-open',
+                    'file_delete': 'fa-trash', 'shell_exec': 'fa-terminal', 'memory_store': 'fa-database',
+                    'memory_search': 'fa-search-plus', 'run_python': 'fa-code', 'run_javascript': 'fa-code',
+                    'create_pdf': 'fa-file-pdf', 'image_search': 'fa-image',
+                };
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        const jsonStr = line.slice(6).trim();
+                        if (!jsonStr) continue;
+
+                        let evt;
+                        try { evt = JSON.parse(jsonStr); } catch { continue; }
+
+                        if (evt.type === 'thinking') {
+                            thinkCount++;
+                            const thinkHtml = `<details class="think-block" open>
+                                <summary>
+                                    <i class="fas fa-caret-right think-caret"></i>
+                                    <i class="fas fa-brain" style="color:#a78bfa;font-size:0.75rem;"></i>
+                                    <span>Thought ${thinkCount}</span>
+                                </summary>
+                                <div class="think-body">${escapeHtml(evt.thinking)}</div>
+                            </details>`;
+                            stepsArea.insertAdjacentHTML('beforeend', thinkHtml);
+                            if (statusEl) statusEl.textContent = `Thinking... (${thinkCount} thought(s), ${toolCount} tool(s))`;
+                            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                        }
+
+                        else if (evt.type === 'tool_call') {
+                            toolCount++;
+                            const icon = toolIcons[evt.action] || 'fa-cog';
+                            const toolId = stepsContainerId + '-tool-' + toolCount;
+                            const inputPreview = (evt.action_input || '').substring(0, 100);
+                            const toolHtml = `<div class="agent-step" id="${toolId}" style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);">
+                                <div class="agent-step-action" style="display:flex;align-items:center;gap:6px;color:#fbbf24;font-family:'JetBrains Mono',monospace;font-size:0.75rem;">
+                                    <i class="fas fa-spinner fa-spin" id="${toolId}-spinner" style="font-size:0.65rem;color:#94a3b8;"></i>
+                                    <i class="fas ${icon}"></i>
+                                    <strong>${escapeHtml(evt.action)}</strong>
+                                    <span style="color:#94a3b8;font-size:0.7rem;">${escapeHtml(inputPreview)}</span>
+                                </div>
+                            </div>`;
+                            stepsArea.insertAdjacentHTML('beforeend', toolHtml);
+                            if (statusEl) statusEl.textContent = `Running tool: ${evt.action} (${thinkCount} thought(s), ${toolCount} tool(s))`;
+                            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                        }
+
+                        else if (evt.type === 'tool_result') {
+                            // Find the last tool div and update spinner + add observation
+                            const toolEl = stepsArea.querySelector(`#${stepsContainerId}-tool-${toolCount}`);
+                            if (toolEl) {
+                                const spinner = toolEl.querySelector('.fa-spinner');
+                                if (spinner) { spinner.className = 'fas fa-check'; spinner.style.color = '#86efac'; }
+                                const obsId = stepsContainerId + '-obs-' + toolCount;
+                                const obsPreview = (evt.observation || '').length > 80 ? evt.observation.substring(0, 80) + '...' : (evt.observation || '');
+                                toolEl.insertAdjacentHTML('beforeend', `
+                                    <div class="agent-step-obs-toggle" onclick="toggleSteps('${obsId}')" style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 0 2px 20px;">
+                                        <i class="fas fa-caret-right" id="${obsId}-icon" style="font-size:0.6rem;width:10px;color:#6b7280;"></i>
+                                        <span style="color:#6b7280;font-size:0.7rem;">${escapeHtml(obsPreview)}</span>
+                                    </div>
+                                    <div class="agent-steps-body" id="${obsId}" style="display:none;margin-left:20px;">
+                                        <div class="agent-step-observation" style="color:#86efac;font-size:0.75rem;max-height:100px;overflow-y:auto;padding:6px;background:rgba(0,0,0,0.2);border-radius:4px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(evt.observation || '')}</div>
+                                    </div>
+                                `);
+                            }
+                            if (statusEl) statusEl.textContent = `Continuing... (${thinkCount} thought(s), ${toolCount} tool(s))`;
+                        }
+
+                        else if (evt.type === 'status') {
+                            if (statusEl) statusEl.textContent = evt.message;
+                        }
+
+                        else if (evt.type === 'answer') {
+                            finalAnswer = evt.answer || '';
+                        }
+
+                        else if (evt.type === 'error') {
+                            if (statusEl) statusEl.textContent = evt.error;
+                            statusEl.style.color = '#ef4444';
+                        }
+
+                        else if (evt.type === 'done') {
+                            // Update container header to final state
+                            const container = document.getElementById(stepsContainerId);
+                            if (container && (thinkCount > 0 || toolCount > 0)) {
+                                const summary = [];
+                                if (thinkCount > 0) summary.push(`${thinkCount} thought(s)`);
+                                if (toolCount > 0) summary.push(`${toolCount} tool(s)`);
+                                const headerEl = container.querySelector(':scope > div:first-child');
+                                if (headerEl) {
+                                    const stepsBodyId = stepsContainerId + '-steps';
+                                    headerEl.outerHTML = `<div class="agent-steps-header" onclick="toggleSteps('${stepsBodyId}')" style="padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:8px;color:#a5b4fc;font-weight:500;">
+                                        <i class="fas fa-caret-down" id="${stepsBodyId}-icon"></i>
+                                        <i class="fas fa-brain" style="color:#a78bfa;"></i>
+                                        <span style="color:#c4b5fd;font-size:0.85rem;">Agent: ${summary.join(', ')}</span>
+                                    </div>`;
+                                }
+                                container.style.border = '1px solid rgba(167,139,250,0.3)';
+                                container.style.background = 'rgba(167,139,250,0.06)';
+                                container.style.borderRadius = '8px';
+                            } else if (container && thinkCount === 0 && toolCount === 0) {
+                                container.remove();
+                            }
+                        }
                     }
+                }
 
-                    // Show final answer
-                    const answer = data.answer || data.error || 'No response received from LLM. Check Settings > LLM connection.';
-                    messagesDiv.innerHTML += `<div class="chat-message assistant">${markdownToHtml(answer)}</div>`;
-                    chatHistory.push({ role: 'assistant', content: answer });
-
-                    // Refresh files in case agent modified them
+                // Show final answer
+                if (finalAnswer) {
+                    messagesDiv.innerHTML += `<div class="chat-message assistant">${markdownToHtml(finalAnswer)}</div>`;
+                    chatHistory.push({ role: 'assistant', content: finalAnswer });
                     loadFiles();
                 } else {
-                    const errMsg = data.answer || data.error || 'Agent failed. Check LLM connection in Settings.';
-                    messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">${escapeHtml(errMsg)}</div>`;
+                    messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">Agent did not respond. Check Settings > LLM connection.</div>`;
                 }
             } catch (e) {
-                document.getElementById(loadingId)?.remove();
-                messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">Connection error: ${e.message}</div>`;
+                const container = document.getElementById(stepsContainerId);
+                if (e.name === 'AbortError') {
+                    // User stopped — clean up steps container header
+                    if (container) {
+                        const stepsBodyId = stepsContainerId + '-steps';
+                        const headerEl = container.querySelector(':scope > div:first-child');
+                        if (headerEl) {
+                            headerEl.outerHTML = `<div class="agent-steps-header" onclick="toggleSteps('${stepsBodyId}')" style="padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:8px;color:#f97316;font-weight:500;">
+                                <i class="fas fa-caret-down" id="${stepsBodyId}-icon"></i>
+                                <i class="fas fa-stop-circle" style="color:#f97316;"></i>
+                                <span style="color:#f97316;font-size:0.85rem;">Stopped by user</span>
+                            </div>`;
+                        }
+                        container.style.border = '1px solid rgba(249,115,22,0.3)';
+                        container.style.background = 'rgba(249,115,22,0.05)';
+                        container.style.borderRadius = '8px';
+                    }
+                } else {
+                    if (container) container.remove();
+                    messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">Connection error: ${e.message}</div>`;
+                }
+            } finally {
+                agentAbortController = null;
+                setChatSendBtn('send');
             }
 
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
@@ -1869,6 +2249,8 @@
         // Render agent steps as a collapsible UI
         function renderAgentSteps(steps) {
             if (!steps || steps.length === 0) return '';
+            console.error('[renderAgentSteps] Called with', steps.length, 'steps');
+            steps.forEach((s, idx) => console.error(`[renderAgentSteps] Step ${idx}: thinking=${!!s.thinking}, action=${s.action||'none'}`));
 
             const stepsId = 'steps-' + Date.now();
             let stepsContent = '';
@@ -1898,14 +2280,14 @@
                 if (step.thinking) {
                     thinkCount++;
                     const thinkId = stepsId + '-think-' + i;
-                    const thinkPreview = step.thinking.length > 60 ? step.thinking.substring(0, 60) + '...' : step.thinking;
+                    const thinkPreview = step.thinking.length > 80 ? step.thinking.substring(0, 80) + '...' : step.thinking;
                     stepsContent += `<div class="agent-step-thinking" onclick="toggleSteps('${thinkId}')" style="cursor:pointer;">
-                        <i class="fas fa-caret-right" id="${thinkId}-icon" style="font-size:0.6rem;width:10px;"></i>
-                        <i class="fas fa-brain" style="color:#a78bfa;font-size:0.65rem;"></i>
-                        <span style="color:#a78bfa;font-size:0.7rem;">${escapeHtml(thinkPreview)}</span>
+                        <i class="fas fa-caret-down" id="${thinkId}-icon" style="font-size:0.75rem;width:12px;color:#a78bfa;"></i>
+                        <i class="fas fa-brain" style="color:#a78bfa;font-size:0.75rem;"></i>
+                        <span style="color:#c4b5fd;font-size:0.8rem;">${escapeHtml(thinkPreview)}</span>
                     </div>
-                    <div class="agent-steps-body" id="${thinkId}" style="display:none;margin-left:18px;margin-bottom:4px;">
-                        <div style="color:#c4b5fd;font-size:0.7rem;background:rgba(167,139,250,0.08);padding:6px 8px;border-radius:6px;white-space:pre-wrap;line-height:1.4;">${escapeHtml(step.thinking)}</div>
+                    <div class="agent-steps-body open" id="${thinkId}" style="display:block;margin-left:20px;margin-bottom:6px;">
+                        <div style="color:#ddd6fe;font-size:0.8rem;background:rgba(167,139,250,0.1);padding:8px 10px;border-radius:6px;white-space:pre-wrap;line-height:1.5;border-left:2px solid #a78bfa;">${escapeHtml(step.thinking)}</div>
                     </div>`;
                 }
 
@@ -1945,13 +2327,13 @@
             if (thinkCount > 0) summary.push(`${thinkCount} thinking`);
             if (toolCount > 0) summary.push(`${toolCount} tool`);
 
-            return `<div class="agent-steps">
-                <div class="agent-steps-header" onclick="toggleSteps('${stepsId}')">
-                    <i class="fas fa-caret-down" id="${stepsId}-icon"></i>
-                    <i class="fas fa-robot"></i>
-                    Agent: ${summary.join(', ')}
+            return `<div class="agent-steps" style="border: 1px solid rgba(167,139,250,0.4); background: rgba(167,139,250,0.06);">
+                <div class="agent-steps-header" onclick="toggleSteps('${stepsId}')" style="padding:10px 14px;">
+                    <i class="fas fa-caret-right" id="${stepsId}-icon"></i>
+                    <i class="fas fa-brain" style="color:#a78bfa;"></i>
+                    <span style="color:#c4b5fd; font-size:0.85rem;">Agent: ${summary.join(', ')}</span>
                 </div>
-                <div class="agent-steps-body open" id="${stepsId}">
+                <div class="agent-steps-body" id="${stepsId}" style="display:none;">
                     ${stepsContent}
                 </div>
             </div>`;
@@ -2425,14 +2807,36 @@ sys.stderr = io.StringIO()
                         el('set_llm_key_cloud').placeholder = s.llm_api_key_cloud_set ? 'Key is set (type to change)' : '';
                     }
 
-                    // Other settings
+                    // Agent settings
                     if (el('set_max_iterations')) el('set_max_iterations').value = s.max_agent_iterations || 6;
+                    if (el('set_chat_context_limit')) el('set_chat_context_limit').value = s.chat_context_limit || 10;
                     if (el('set_search_engine')) el('set_search_engine').value = s.search_engine || 'duckduckgo';
+
+                    // LLM generation
+                    if (el('set_llm_temperature')) el('set_llm_temperature').value = s.llm_temperature ?? 0.7;
+                    if (el('set_llm_max_tokens')) el('set_llm_max_tokens').value = s.llm_max_tokens || 4096;
+                    if (el('set_llm_think')) {
+                        el('set_llm_think').checked = s.llm_think === true;
+                        updateToggle(el('set_llm_think'));
+                    }
+
+                    // Timeouts
+                    if (el('set_timeout_agent')) el('set_timeout_agent').value = s.timeout_agent || 120;
+                    if (el('set_timeout_web_fetch')) el('set_timeout_web_fetch').value = s.timeout_web_fetch || 15;
+                    if (el('set_timeout_web_search')) el('set_timeout_web_search').value = s.timeout_web_search || 15;
+                    if (el('set_timeout_image')) el('set_timeout_image').value = s.timeout_image || 30;
+                    if (el('set_timeout_llm_test')) el('set_timeout_llm_test').value = s.timeout_llm_test || 60;
+
+                    // Security
                     if (el('set_shell_enabled')) {
                         el('set_shell_enabled').checked = s.shell_enabled !== false;
                         updateToggle(el('set_shell_enabled'));
                     }
                     if (el('set_admin_pw')) el('set_admin_pw').value = '';
+
+                    // Also refresh share keys list and active key display
+                    loadShareKeys();
+                    updateActiveShareKeyDisplay();
                 }
             } catch (e) {
                 showToast('Failed to load settings', 'error');
@@ -2450,7 +2854,7 @@ sys.stderr = io.StringIO()
 
         // Add toggle event listener via delegation
         document.addEventListener('change', (e) => {
-            if (e.target.id === 'set_shell_enabled') {
+            if (e.target.id === 'set_shell_enabled' || e.target.id === 'set_llm_think') {
                 updateToggle(e.target);
             }
         });
@@ -2466,8 +2870,21 @@ sys.stderr = io.StringIO()
                 llm_api_url_cloud: el('set_llm_url_cloud')?.value,
                 llm_model_cloud: el('set_llm_model_cloud')?.value,
                 max_agent_iterations: parseInt(el('set_max_iterations')?.value) || 6,
+                chat_context_limit: parseInt(el('set_chat_context_limit')?.value) || 10,
                 search_engine: el('set_search_engine')?.value,
                 shell_enabled: el('set_shell_enabled')?.checked ?? true,
+
+                // LLM generation
+                llm_temperature: parseFloat(el('set_llm_temperature')?.value) || 0.7,
+                llm_max_tokens: parseInt(el('set_llm_max_tokens')?.value) || 4096,
+                llm_think: el('set_llm_think')?.checked ?? false,
+
+                // Timeouts
+                timeout_agent: parseInt(el('set_timeout_agent')?.value) || 120,
+                timeout_web_fetch: parseInt(el('set_timeout_web_fetch')?.value) || 15,
+                timeout_web_search: parseInt(el('set_timeout_web_search')?.value) || 15,
+                timeout_image: parseInt(el('set_timeout_image')?.value) || 30,
+                timeout_llm_test: parseInt(el('set_timeout_llm_test')?.value) || 60,
             };
 
             // Only send API keys if user typed a new one (not the masked value)
@@ -2535,6 +2952,147 @@ sys.stderr = io.StringIO()
                 resultDiv.style.color = '#fca5a5';
                 resultDiv.innerHTML = `<i class="fas fa-times-circle"></i> ${sourceLabel} Error: ` + e.message;
             }
+        }
+
+        // ========== SHARE KEYS ==========
+
+        let cachedShareKey = null; // { id, label, owner, model, api_url }
+
+        function updateActiveShareKeyDisplay() {
+            const info = document.getElementById('active_share_key_info');
+            const input = document.getElementById('active_share_key_input');
+            if (!info) return;
+            if (cachedShareKey) {
+                info.innerHTML = `<span style="color:#86efac;"><i class="fas fa-check-circle"></i> Active: <b>${escapeHtml(cachedShareKey.label)}</b> by ${escapeHtml(cachedShareKey.owner)} · model: ${escapeHtml(cachedShareKey.model)}</span>`;
+                if (input) input.value = cachedShareKey.id;
+            } else {
+                info.innerHTML = '';
+                if (input) input.value = '';
+            }
+        }
+
+        async function applyShareKey() {
+            const input = document.getElementById('active_share_key_input');
+            const keyId = input?.value?.trim();
+            if (!keyId) { showToast('Enter a share key', 'error'); return; }
+            try {
+                const res = await fetch(`${API}/share-keys/validate/${encodeURIComponent(keyId)}`);
+                const data = await res.json();
+                if (data.active) {
+                    cachedShareKey = { id: keyId, label: data.label, owner: data.owner, model: data.model, api_url: data.api_url };
+                    updateActiveShareKeyDisplay();
+                    showToast(`Share key applied: ${data.label}`, 'success');
+                } else {
+                    showToast(data.error || 'Invalid or inactive share key', 'error');
+                }
+            } catch (e) {
+                showToast('Error validating share key', 'error');
+            }
+        }
+
+        function clearShareKey() {
+            cachedShareKey = null;
+            const input = document.getElementById('active_share_key_input');
+            if (input) input.value = '';
+            updateActiveShareKeyDisplay();
+            showToast('Share key cleared', 'info');
+        }
+
+        async function loadShareKeys() {
+            const list = document.getElementById('share_keys_list');
+            if (!list) return;
+            list.innerHTML = '<div style="color:#6b7280;font-size:0.8rem;text-align:center;padding:8px;"><i class="fas fa-spinner fa-spin"></i> Loading...</div>';
+            try {
+                const res = await fetch(`${API}/share-keys`, {
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}` }
+                });
+                const data = await res.json();
+                if (!data.keys || data.keys.length === 0) {
+                    list.innerHTML = '<div style="color:#6b7280;font-size:0.8rem;text-align:center;padding:8px;">No share keys created yet.</div>';
+                    return;
+                }
+                list.innerHTML = data.keys.map(k => `
+                    <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,${k.active ? '0.12' : '0.05'});border-radius:8px;padding:10px;display:flex;align-items:center;gap:8px;opacity:${k.active ? 1 : 0.5};">
+                        <div style="flex:1;min-width:0;">
+                            <div style="font-size:0.82rem;font-weight:600;color:#e5e7eb;margin-bottom:2px;">${escapeHtml(k.label)} ${k.active ? '' : '<span style="color:#ef4444;font-size:0.7rem;">[revoked]</span>'}</div>
+                            <div style="font-family:monospace;font-size:0.72rem;color:#818cf8;margin-bottom:2px;">${escapeHtml(k.id)}</div>
+                            <div style="font-size:0.72rem;color:#6b7280;">${escapeHtml(k.model)} · ${k.uses} use${k.uses !== 1 ? 's' : ''}${k.max_uses ? ' / ' + k.max_uses : ''}</div>
+                        </div>
+                        <button onclick="copyToClipboard('${escapeHtml(k.id)}')" title="Copy key" style="background:rgba(99,102,241,0.15);border:none;border-radius:6px;padding:6px 8px;color:#a5b4fc;cursor:pointer;font-size:0.75rem;"><i class="fas fa-copy"></i></button>
+                        ${k.active ? `<button onclick="revokeShareKey('${escapeHtml(k.id)}')" title="Revoke" style="background:rgba(239,68,68,0.1);border:none;border-radius:6px;padding:6px 8px;color:#fca5a5;cursor:pointer;font-size:0.75rem;"><i class="fas fa-trash"></i></button>` : ''}
+                    </div>
+                `).join('');
+            } catch (e) {
+                list.innerHTML = '<div style="color:#ef4444;font-size:0.8rem;text-align:center;padding:8px;">Failed to load share keys.</div>';
+            }
+        }
+
+        async function createShareKey() {
+            const label = document.getElementById('sk_new_label')?.value?.trim();
+            if (!label) { showToast('Please enter a label', 'error'); return; }
+            const settings = cachedSettings || {};
+            const activeSource = settings.llm_active_source || 'local';
+            const defaultUrl = activeSource === 'cloud' ? settings.llm_api_url_cloud : settings.llm_api_url_local;
+            const defaultModel = activeSource === 'cloud' ? settings.llm_model_cloud : settings.llm_model_local;
+
+            const api_url = document.getElementById('sk_new_api_url')?.value?.trim() || defaultUrl || '';
+            const model = document.getElementById('sk_new_model')?.value?.trim() || defaultModel || '';
+            const api_key = document.getElementById('sk_new_api_key')?.value?.trim() || '';
+            const maxUsesVal = document.getElementById('sk_new_max_uses')?.value?.trim();
+            const max_uses = maxUsesVal ? parseInt(maxUsesVal) : null;
+
+            if (!api_url) { showToast('API URL is required (or configure LLM settings first)', 'error'); return; }
+            if (!model) { showToast('Model is required', 'error'); return; }
+
+            try {
+                const res = await fetch(`${API}/share-keys`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token: localStorage.getItem('auth_token') || '', label, api_url, model, api_key, max_uses })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(`Share key created: ${data.key}`, 'success');
+                    // Clear form
+                    ['sk_new_label','sk_new_api_url','sk_new_model','sk_new_api_key','sk_new_max_uses'].forEach(id => {
+                        const el = document.getElementById(id);
+                        if (el) el.value = '';
+                    });
+                    loadShareKeys();
+                } else {
+                    showToast(data.error || 'Failed to create share key', 'error');
+                }
+            } catch (e) {
+                showToast('Error creating share key', 'error');
+            }
+        }
+
+        async function revokeShareKey(keyId) {
+            if (!confirm(`Revoke share key ${keyId}? Recipients won't be able to use it anymore.`)) return;
+            try {
+                const res = await fetch(`${API}/share-keys/${encodeURIComponent(keyId)}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}` }
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('Share key revoked', 'success');
+                    if (cachedShareKey?.id === keyId) clearShareKey();
+                    loadShareKeys();
+                } else {
+                    showToast(data.error || 'Failed to revoke', 'error');
+                }
+            } catch (e) {
+                showToast('Error revoking share key', 'error');
+            }
+        }
+
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                showToast('Copied to clipboard!', 'success');
+            }).catch(() => {
+                showToast('Copy failed', 'error');
+            });
         }
 
         // Terminal
@@ -2772,10 +3330,9 @@ sys.stderr = io.StringIO()
         }
         
         // Open file
-        async function openFile(name, isDir) {
+        async function openFile(name, isDir, displayName) {
             if (isDir) {
-                showToast(`Opening folder: ${name}`, 'info');
-                // TODO: Navigate into folder
+                openFolderWindow(name, displayName || name.split('/').pop());
             } else {
                 const ext = name.split('.').pop().toLowerCase();
                 const binaryExts = ['pdf', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'zip', 'tar', 'gz', 'mp3', 'mp4', 'wav', 'ogg'];
@@ -2788,6 +3345,147 @@ sys.stderr = io.StringIO()
         }
 
         // Download or view binary files (PDF, images, etc.)
+        async function openFolderWindow(folderPath, folderName) {
+            const winId = 'folder-' + folderPath.replace(/[^a-z0-9]/gi, '-');
+            const username = currentUser?.username || 'guest';
+
+            // If window already exists, bring to front
+            const existing = document.getElementById(`window-${winId}`);
+            if (existing) {
+                existing.style.zIndex = ++windowZIndex;
+                existing.classList.remove('minimized');
+                return;
+            }
+
+            const loadFolderFiles = async (path) => {
+                const url = path ? `${API}/files/${username}?path=${encodeURIComponent(path)}` : `${API}/files/${username}`;
+                const res = await fetch(url);
+                const data = await res.json();
+                return data.files || [];
+            };
+
+            const renderFolder = async (path) => {
+                const gridId = `fgrid-${winId}`;
+                const breadId = `fbread-${winId}`;
+                const folderFiles = await loadFolderFiles(path);
+
+                const parts = path ? path.split('/') : [];
+                let bread = `<span onclick="renderFolderInWindow('${winId}', '', '${folderPath}')" style="cursor:pointer;color:#818cf8;">${folderName}</span>`;
+                parts.slice(folderPath.split('/').length).forEach((part, i) => {
+                    const p = [...folderPath.split('/'), ...parts.slice(folderPath.split('/').length, folderPath.split('/').length + i + 1)].join('/');
+                    bread += ` <span style="color:#6b7280;">›</span> <span onclick="renderFolderInWindow('${winId}', '${p}', '${folderPath}')" style="cursor:pointer;color:#818cf8;">${part}</span>`;
+                });
+
+                const breadEl = document.getElementById(breadId);
+                if (breadEl) breadEl.innerHTML = bread;
+
+                const grid = document.getElementById(gridId);
+                if (!grid) return;
+
+                let html = '';
+                if (path !== folderPath) {
+                    const parentParts = path.split('/');
+                    parentParts.pop();
+                    const parentPath = parentParts.join('/');
+                    html += `<div class="file-item" ondblclick="renderFolderInWindow('${winId}', '${parentPath}', '${folderPath}')">
+                        <i class="fas fa-arrow-left" style="color:#9ca3af;font-size:1.2rem;"></i>
+                        <span style="color:#9ca3af;">..</span>
+                    </div>`;
+                }
+                html += folderFiles.map(f => {
+                    const fullPath = path ? `${path}/${f.name}` : f.name;
+                    const icon = f.is_dir ? 'fa-folder text-yellow-400' : getFileIcon(f.name);
+                    return `<div class="file-item" ondblclick="${f.is_dir ? `renderFolderInWindow('${winId}','${fullPath}','${folderPath}')` : `openFile('${fullPath}', false, '${f.name}')`}">
+                        <i class="fas ${icon}"></i>
+                        <span>${f.name}</span>
+                    </div>`;
+                }).join('');
+                if (!html) html = '<div style="grid-column:1/-1;text-align:center;color:#6b7280;padding:20px;">Folder is empty</div>';
+                grid.innerHTML = html;
+            };
+
+            // Store render function globally for onclick access
+            window[`renderFolderInWindow`] = async (wid, path, rootPath) => {
+                const gridId = `fgrid-${wid}`;
+                const breadId = `fbread-${wid}`;
+                const folderFiles = await loadFolderFiles(path);
+                const rootName = rootPath.split('/').pop();
+
+                const parts = path ? path.split('/') : [];
+                const rootParts = rootPath.split('/');
+                let bread = `<span onclick="renderFolderInWindow('${wid}','${rootPath}','${rootPath}')" style="cursor:pointer;color:#818cf8;">${rootName}</span>`;
+                const subParts = parts.slice(rootParts.length);
+                subParts.forEach((part, i) => {
+                    const p = [...rootParts, ...subParts.slice(0, i + 1)].join('/');
+                    bread += ` <span style="color:#6b7280;">›</span> <span onclick="renderFolderInWindow('${wid}','${p}','${rootPath}')" style="cursor:pointer;color:#818cf8;">${part}</span>`;
+                });
+
+                const breadEl = document.getElementById(breadId);
+                if (breadEl) breadEl.innerHTML = bread;
+
+                const grid = document.getElementById(gridId);
+                if (!grid) return;
+
+                let html = '';
+                if (path !== rootPath) {
+                    const parentParts = path.split('/');
+                    parentParts.pop();
+                    const parentPath = parentParts.join('/') || rootPath;
+                    html += `<div class="file-item" ondblclick="renderFolderInWindow('${wid}','${parentPath}','${rootPath}')">
+                        <i class="fas fa-arrow-left" style="color:#9ca3af;font-size:1.2rem;"></i>
+                        <span style="color:#9ca3af;">..</span>
+                    </div>`;
+                }
+                html += folderFiles.map(f => {
+                    const fullPath = path ? `${path}/${f.name}` : f.name;
+                    const icon = f.is_dir ? 'fa-folder text-yellow-400' : getFileIcon(f.name);
+                    const dblclick = f.is_dir ? `renderFolderInWindow('${wid}','${fullPath}','${rootPath}')` : `openFile('${fullPath}', false, '${f.name}')`;
+                    return `<div class="file-item folder-win-item" ondblclick="${dblclick}"
+                         oncontextmenu="event.stopPropagation();event.preventDefault();setFolderContext('${fullPath}','${f.name}',${f.is_dir},'${wid}','${path}','${rootPath}',event)"
+                         style="position:relative;">
+                        <i class="fas ${icon}"></i>
+                        <span>${f.name}</span>
+                        <span class="folder-item-actions">
+                            <i class="fas fa-trash" title="Delete" onclick="event.stopPropagation();deleteFolderItem('${fullPath}','${wid}','${path}','${rootPath}')" style="color:#ef4444;cursor:pointer;font-size:0.7rem;padding:3px 5px;border-radius:4px;"></i>
+                        </span>
+                    </div>`;
+                }).join('');
+                if (!html) html = '<div style="grid-column:1/-1;text-align:center;color:#6b7280;padding:20px;">Folder is empty</div>';
+                grid.innerHTML = html;
+            };
+
+            createWindow(winId, `📁 ${folderName}`, `
+                <div id="fbread-${winId}" style="font-size:0.75rem;margin-bottom:6px;color:#818cf8;min-height:0;"></div>
+                <div class="file-grid" id="fgrid-${winId}">
+                    <div style="grid-column:1/-1;text-align:center;color:#6b7280;padding:20px;">Loading...</div>
+                </div>
+            `, 550, 400);
+
+            await window.renderFolderInWindow(winId, folderPath, folderPath);
+        }
+
+        async function deleteFolderItem(fullPath, wid, currentPath, rootPath) {
+            if (!confirm(`Delete: ${fullPath.split('/').pop()}?`)) return;
+            const username = currentUser?.username || 'guest';
+            try {
+                const res = await fetch(`${API}/files/delete`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, names: [fullPath] })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('Deleted', 'success');
+                    window.renderFolderInWindow(wid, currentPath, rootPath);
+                    loadFiles();
+                } else {
+                    showToast(data.error || 'Could not delete', 'error');
+                }
+            } catch (e) {
+                showToast('Error: ' + e.message, 'error');
+            }
+        }
+
         async function downloadOrViewFile(name, ext) {
             const username = currentUser?.username || 'guest';
             const url = `${API}/files/download/${username}/${encodeURIComponent(name)}`;
@@ -2816,6 +3514,19 @@ sys.stderr = io.StringIO()
         }
         
         // File Editor Window
+        // Returns the run language for a filename, or null if not runnable
+        function getRunLang(filename) {
+            const ext = (filename.split('.').pop() || '').toLowerCase();
+            return { py:'python', js:'javascript', mjs:'javascript', cjs:'javascript',
+                     ts:'typescript', sh:'shell', bash:'shell' }[ext] || null;
+        }
+
+        // Lang badge colors
+        const LANG_COLORS = {
+            python: '#3b82f6', javascript: '#f59e0b', typescript: '#06b6d4',
+            shell: '#22c55e', bash: '#22c55e'
+        };
+
         async function openFileEditor(name) {
             const username = currentUser?.username || 'guest';
             try {
@@ -2825,58 +3536,191 @@ sys.stderr = io.StringIO()
                     body: JSON.stringify({ username, name })
                 });
                 const data = await res.json();
-                
+
                 const content = data.success ? data.content : '';
                 const editorId = `editor-${name.replace(/[^a-z0-9]/gi, '-')}`;
-                
-                // Check if window already exists
+
                 const existing = document.getElementById(`window-${editorId}`);
                 if (existing) {
                     existing.style.zIndex = ++windowZIndex;
                     existing.classList.remove('minimized');
                     return;
                 }
-                
+
+                const lang = getRunLang(name);
+                const langColor = lang ? (LANG_COLORS[lang] || '#8b5cf6') : null;
+                const langBadge = lang
+                    ? `<span style="background:${langColor}22;border:1px solid ${langColor}55;color:${langColor};padding:3px 8px;border-radius:4px;font-size:0.7rem;font-family:'JetBrains Mono',monospace;">${lang}</span>`
+                    : '';
+                const runBtn = lang
+                    ? `<button onclick="runEditorFile('${name}','${editorId}','${lang}')" style="background:linear-gradient(135deg,${langColor},${langColor}cc);border:none;border-radius:6px;padding:8px 14px;color:#fff;cursor:pointer;font-weight:600;font-size:0.85rem;display:flex;align-items:center;gap:6px;"><i class='fas fa-play' style='font-size:0.7rem;'></i> Run</button>`
+                    : '';
+
                 createWindow(editorId, `📄 ${name}`, `
-                    <div style="height:100%;display:flex;flex-direction:column;">
-                        <textarea id="file-content-${editorId}" style="
-                            flex:1;
-                            background:#000;
-                            border:1px solid rgba(255,255,255,0.1);
-                            border-radius:8px;
-                            padding:12px;
-                            color:#fff;
-                            font-family:'JetBrains Mono',monospace;
-                            font-size:13px;
-                            resize:none;
-                            outline:none;
-                        ">${escapeHtml(content)}</textarea>
-                        <div style="margin-top:10px;display:flex;gap:8px;">
-                            <button onclick="saveFileContent('${name}', '${editorId}')" style="
-                                background:linear-gradient(135deg,#22c55e,#16a34a);
-                                border:none;
-                                border-radius:6px;
-                                padding:8px 16px;
-                                color:#fff;
-                                cursor:pointer;
-                                font-weight:500;
-                            ">💾 Save</button>
-                            <button onclick="closeWindow('${editorId}')" style="
-                                background:rgba(239,68,68,0.2);
-                                border:1px solid rgba(239,68,68,0.3);
-                                border-radius:6px;
-                                padding:8px 16px;
-                                color:#ef4444;
-                                cursor:pointer;
-                            ">Cancel</button>
+                    <div style="height:100%;display:flex;flex-direction:column;gap:8px;">
+
+                        <!-- Editor row: line numbers + textarea -->
+                        <div style="display:flex;flex:1;min-height:0;border:1px solid rgba(255,255,255,0.1);border-radius:8px;overflow:hidden;">
+                            <div id="lnum-${editorId}" style="
+                                background:#0d0d0d;color:#4b5563;
+                                font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.6;
+                                padding:12px 8px 12px 4px;text-align:right;
+                                user-select:none;min-width:38px;
+                                border-right:1px solid rgba(255,255,255,0.07);
+                                overflow:hidden;white-space:pre;
+                            ">1</div>
+                            <textarea id="file-content-${editorId}" spellcheck="false" style="
+                                flex:1;background:#050505;border:none;
+                                padding:12px 12px 12px 10px;color:#e2e8f0;
+                                font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.6;
+                                resize:none;outline:none;tab-size:4;white-space:pre;
+                            ">${escapeHtml(content)}</textarea>
                         </div>
+
+                        <!-- Toolbar -->
+                        <div style="display:flex;gap:8px;align-items:center;flex-shrink:0;">
+                            ${runBtn}
+                            <button onclick="saveFileContent('${name}','${editorId}')" style="background:linear-gradient(135deg,#22c55e,#16a34a);border:none;border-radius:6px;padding:8px 14px;color:#fff;cursor:pointer;font-weight:500;font-size:0.85rem;display:flex;align-items:center;gap:5px;"><i class='fas fa-save' style='font-size:0.7rem;'></i> Save</button>
+                            <button onclick="closeWindow('${editorId}')" style="background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.3);border-radius:6px;padding:8px 12px;color:#ef4444;cursor:pointer;font-size:0.85rem;">✕ Cancel</button>
+                            ${langBadge}
+                            <span id="run-status-${editorId}" style="margin-left:auto;font-size:0.75rem;font-family:'JetBrains Mono',monospace;"></span>
+                        </div>
+
+                        <!-- Output panel (hidden until first run) -->
+                        <div id="run-output-${editorId}" style="display:none;flex-direction:column;flex-shrink:0;background:#080808;border:1px solid rgba(255,255,255,0.1);border-radius:8px;max-height:200px;overflow:hidden;">
+                            <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 12px;border-bottom:1px solid rgba(255,255,255,0.07);background:#0d0d0d;">
+                                <span style="color:#6b7280;font-size:0.7rem;font-family:'JetBrains Mono',monospace;letter-spacing:1px;">OUTPUT</span>
+                                <button onclick="clearEditorOutput('${editorId}')" style="background:none;border:none;color:#4b5563;cursor:pointer;font-size:0.75rem;padding:0 2px;" title="Clear">🗑</button>
+                            </div>
+                            <div id="run-output-content-${editorId}" style="padding:8px 12px;font-family:'JetBrains Mono',monospace;font-size:0.8rem;white-space:pre-wrap;word-break:break-word;overflow-y:auto;max-height:160px;"></div>
+                        </div>
+
                     </div>
-                `, 600, 450);
+                `, 660, 520);
+
+                // Wire up line numbers + tab key
+                setupEditorLineNumbers(editorId);
+
             } catch (e) {
                 showToast('Failed to open file', 'error');
             }
         }
-        
+
+        function setupEditorLineNumbers(editorId) {
+            const ta = document.getElementById(`file-content-${editorId}`);
+            const ln = document.getElementById(`lnum-${editorId}`);
+            if (!ta || !ln) return;
+
+            function updateLN() {
+                const count = ta.value.split('\n').length;
+                ln.textContent = Array.from({length: count}, (_, i) => i + 1).join('\n');
+                ln.scrollTop = ta.scrollTop;
+            }
+
+            ta.addEventListener('input', updateLN);
+            ta.addEventListener('scroll', () => { ln.scrollTop = ta.scrollTop; });
+            ta.addEventListener('keydown', (e) => {
+                if (e.key === 'Tab') {
+                    e.preventDefault();
+                    const s = ta.selectionStart, en = ta.selectionEnd;
+                    ta.value = ta.value.substring(0, s) + '    ' + ta.value.substring(en);
+                    ta.selectionStart = ta.selectionEnd = s + 4;
+                    updateLN();
+                }
+            });
+            updateLN();
+        }
+
+        async function runEditorFile(name, editorId, lang) {
+            // Auto-save before running
+            await saveFileContent(name, editorId);
+
+            const ta = document.getElementById(`file-content-${editorId}`);
+            const code = ta?.value || '';
+            const outWrap = document.getElementById(`run-output-${editorId}`);
+            const outEl = document.getElementById(`run-output-content-${editorId}`);
+            const statusEl = document.getElementById(`run-status-${editorId}`);
+
+            if (!outWrap || !outEl) return;
+            outWrap.style.display = 'flex';
+            outEl.innerHTML = '<span style="color:#6b7280;font-style:italic;">Running…</span>';
+            if (statusEl) { statusEl.textContent = '⏳ running'; statusEl.style.color = '#a78bfa'; }
+
+            const start = performance.now();
+            const username = currentUser?.username || 'guest';
+
+            try {
+                const res = await fetch(`${API}/run`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ language: lang, code, username })
+                });
+                const d = await res.json();
+                const elapsed = ((performance.now() - start) / 1000).toFixed(2);
+
+                let html = '';
+                if (d.stdout) html += `<span style="color:#e2e8f0;">${escapeHtml(d.stdout.trimEnd())}</span>`;
+                if (d.stdout && d.stderr) html += '\n';
+                if (d.stderr) html += parseRunError(d.stderr, editorId);
+                if (d.error)  html += `<span style="color:#f87171;">⚠ ${escapeHtml(d.error)}</span>`;
+                if (d.hint)   html += `\n<span style="color:#60a5fa;font-style:italic;">${escapeHtml(d.hint)}</span>`;
+                if (!html)    html = '<span style="color:#4b5563;">(no output)</span>';
+
+                const exitCode = d.code;
+                const success = d.success !== false && (exitCode === null || exitCode === 0);
+
+                if (exitCode !== null && exitCode !== undefined && exitCode !== 0)
+                    html += `\n<span style="color:#ef4444;font-size:0.7rem;">exit code ${exitCode}</span>`;
+
+                outEl.innerHTML = html;
+                outEl.scrollTop = 0;
+
+                if (statusEl) {
+                    statusEl.textContent = success ? `✅ ${elapsed}s` : `❌ ${elapsed}s`;
+                    statusEl.style.color = success ? '#22c55e' : '#ef4444';
+                }
+            } catch (e) {
+                outEl.innerHTML = `<span style="color:#f87171;">Connection error: ${escapeHtml(e.message)}</span>`;
+                if (statusEl) { statusEl.textContent = '❌ error'; statusEl.style.color = '#ef4444'; }
+            }
+        }
+
+        // Parse stderr: make "line N" clickable → jumps to line in editor
+        function parseRunError(stderr, editorId) {
+            let escaped = escapeHtml(stderr.trimEnd());
+            // Clickable line references
+            escaped = escaped.replace(/line (\d+)/gi, (m, n) =>
+                `<span onclick="goToEditorLine('${editorId}',${n})" style="color:#f87171;text-decoration:underline;cursor:pointer;">${m}</span>`
+            );
+            // Also match JS-style ":N:" patterns like "script.js:5:3"
+            escaped = escaped.replace(/:(\d+):\d+/g, (m, n) =>
+                `<span onclick="goToEditorLine('${editorId}',${n})" style="color:#f87171;text-decoration:underline;cursor:pointer;">${m}</span>`
+            );
+            return `<span style="color:#f87171;">${escaped}</span>`;
+        }
+
+        function goToEditorLine(editorId, lineNum) {
+            const ta = document.getElementById(`file-content-${editorId}`);
+            if (!ta) return;
+            const lines = ta.value.split('\n');
+            const idx = Math.max(0, lineNum - 1);
+            let pos = 0;
+            for (let i = 0; i < idx; i++) pos += lines[i].length + 1;
+            ta.focus();
+            ta.setSelectionRange(pos, pos + (lines[idx]?.length || 0));
+            const lineH = ta.scrollHeight / Math.max(lines.length, 1);
+            ta.scrollTop = Math.max(0, idx * lineH - ta.clientHeight / 2);
+        }
+
+        function clearEditorOutput(editorId) {
+            const outWrap = document.getElementById(`run-output-${editorId}`);
+            const outEl = document.getElementById(`run-output-content-${editorId}`);
+            const statusEl = document.getElementById(`run-status-${editorId}`);
+            if (outWrap) outWrap.style.display = 'none';
+            if (outEl) outEl.innerHTML = '';
+            if (statusEl) { statusEl.textContent = ''; }
+        }
+
         // Save file content
         async function saveFileContent(name, editorId) {
             const textarea = document.getElementById(`file-content-${editorId}`);
@@ -2932,16 +3776,56 @@ sys.stderr = io.StringIO()
         
         function hideContextMenu() {
             document.getElementById('contextMenu').classList.add('hidden');
+            folderContext = null;
         }
-        
+
+        function setFolderContext(fullPath, name, isDir, wid, curPath, rootPath, event) {
+            folderContext = { fullPath, name, isDir, wid, curPath, rootPath };
+            const menu = document.getElementById('contextMenu');
+            const renameMenuItem = document.getElementById('renameMenuItem');
+            const deleteMenuItem = document.getElementById('deleteMenuItem');
+            renameMenuItem.style.display = 'flex';
+            deleteMenuItem.style.display = 'flex';
+            menu.style.left = `${Math.min(event.pageX, window.innerWidth - 170)}px`;
+            menu.style.top = `${Math.min(event.pageY, window.innerHeight - 200)}px`;
+            menu.classList.remove('hidden');
+        }
+
         // Rename selected item
         async function renameSelected() {
+            const ctx = folderContext;  // Save before hideContextMenu clears it
+            hideContextMenu();
+            if (ctx) {
+                const newName = prompt('New name:', ctx.name);
+                if (!newName || newName === ctx.name) return;
+                const username = currentUser?.username || 'guest';
+                // Build new full path: same directory, new filename
+                const parentPath = ctx.fullPath.includes('/') ? ctx.fullPath.substring(0, ctx.fullPath.lastIndexOf('/')) : '';
+                const newFullPath = parentPath ? `${parentPath}/${newName}` : newName;
+                try {
+                    const res = await fetch(`${API}/files/rename`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username, old_name: ctx.fullPath, new_name: newFullPath })
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        showToast('Renamed successfully', 'success');
+                        window.renderFolderInWindow(ctx.wid, ctx.curPath, ctx.rootPath);
+                        loadFiles();
+                    } else {
+                        showToast(data.error || 'Rename failed', 'error');
+                    }
+                } catch (e) {
+                    showToast('Error: ' + e.message, 'error');
+                }
+                return;
+            }
             if (selectedItems.length !== 1) {
                 showToast('Select one item to rename', 'info');
                 return;
             }
             await renameItem(selectedItems[0]);
-            hideContextMenu();
         }
         
         // Create new folder
@@ -3032,15 +3916,30 @@ sys.stderr = io.StringIO()
         // Download selected files
         function downloadSelected() {
             hideContextMenu();
+            const username = currentUser?.username || 'guest';
+            if (folderContext) {
+                const ctx = folderContext;
+                folderContext = null;
+                if (ctx.isDir) { showToast('Folders cannot be downloaded', 'info'); return; }
+                const url = `${API}/files/download/${username}/${encodeURIComponent(ctx.fullPath)}`;
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = ctx.name;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                showToast(`Downloading: ${ctx.name}`, 'success');
+                return;
+            }
             if (selectedItems.length === 0) {
                 showToast('Select files to download', 'info');
                 return;
             }
-            const username = currentUser?.username || 'guest';
             selectedItems.forEach(i => {
                 const file = files[i];
                 if (file.is_dir) return; // skip folders
-                const url = `${API}/files/download/${username}/${encodeURIComponent(file.name)}`;
+                const fullName = currentPath ? `${currentPath}/${file.name}` : file.name;
+                const url = `${API}/files/download/${username}/${encodeURIComponent(fullName)}`;
                 const a = document.createElement('a');
                 a.href = url;
                 a.download = file.name;
@@ -3053,6 +3952,14 @@ sys.stderr = io.StringIO()
 
         // Delete selected items
         async function deleteSelected() {
+            if (folderContext) {
+                const ctx = folderContext;
+                folderContext = null;
+                hideContextMenu();
+                await deleteFolderItem(ctx.fullPath, ctx.wid, ctx.curPath, ctx.rootPath);
+                return;
+            }
+            hideContextMenu();
             if (selectedItems.length === 0) {
                 showToast('Select items to delete', 'info');
                 return;
@@ -3060,12 +3967,13 @@ sys.stderr = io.StringIO()
             const username = currentUser?.username || 'guest';
             const names = selectedItems.map(i => files[i].name).join(', ');
             if (!confirm(`Delete: ${names}?`)) return;
-            
+
             try {
+                const fullNames = selectedItems.map(i => currentPath ? `${currentPath}/${files[i].name}` : files[i].name);
                 const res = await fetch(`${API}/files/delete`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, names: selectedItems.map(i => files[i].name) })
+                    body: JSON.stringify({ username, names: fullNames })
                 });
                 const data = await res.json();
                 

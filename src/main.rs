@@ -1,8 +1,10 @@
-use actix_web::{web, App, HttpServer, HttpResponse, Responder, get, post};
+use actix_web::{web, App, HttpServer, HttpResponse, Responder, get, post, delete};
 use actix_files as fs;
 use actix_multipart::Multipart;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+use tokio_stream;
 use std::sync::Mutex;
 use std::collections::HashMap;
 use sha2::{Sha256, Digest};
@@ -26,6 +28,45 @@ struct User {
     username: String,
     password_hash: String,
 }
+
+/// A share key lets a user share their LLM API access without exposing the real key
+#[derive(Clone, Serialize, Deserialize)]
+struct ShareKey {
+    id: String,            // The token (sk_...)
+    owner: String,         // Username who created it
+    label: String,         // Human-readable description
+    api_url: String,       // LLM endpoint URL
+    model: String,         // Model name
+    api_key: String,       // The actual API key (never returned to non-owners)
+    active: bool,
+    uses: u64,
+    created_at: u64,
+    #[serde(default)]
+    max_uses: Option<u64>,
+}
+
+const SHARE_KEYS_PATH: &str = "data/share_keys.json";
+
+fn load_share_keys() -> HashMap<String, ShareKey> {
+    std::fs::read_to_string(SHARE_KEYS_PATH)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_share_keys(keys: &HashMap<String, ShareKey>) {
+    std::fs::create_dir_all("data").ok();
+    std::fs::write(SHARE_KEYS_PATH, serde_json::to_string_pretty(keys).unwrap_or_default()).ok();
+}
+
+fn default_timeout_agent() -> u64 { 120 }
+fn default_timeout_web_fetch() -> u64 { 15 }
+fn default_timeout_web_search() -> u64 { 15 }
+fn default_timeout_image() -> u64 { 30 }
+fn default_timeout_llm_test() -> u64 { 60 }
+fn default_llm_temperature() -> f64 { 0.7 }
+fn default_llm_max_tokens() -> u64 { 4096 }
+fn default_chat_context_limit() -> usize { 10 }
 
 /// Persistent settings stored in data/settings.json
 #[derive(Clone, Serialize, Deserialize)]
@@ -57,6 +98,30 @@ struct Settings {
     max_agent_iterations: usize,
     shell_enabled: bool,
     admin_password: String,
+
+    // Timeouts (seconds)
+    #[serde(default = "default_timeout_agent")]
+    timeout_agent: u64,
+    #[serde(default = "default_timeout_web_fetch")]
+    timeout_web_fetch: u64,
+    #[serde(default = "default_timeout_web_search")]
+    timeout_web_search: u64,
+    #[serde(default = "default_timeout_image")]
+    timeout_image: u64,
+    #[serde(default = "default_timeout_llm_test")]
+    timeout_llm_test: u64,
+
+    // LLM generation parameters
+    #[serde(default = "default_llm_temperature")]
+    llm_temperature: f64,
+    #[serde(default = "default_llm_max_tokens")]
+    llm_max_tokens: u64,
+    #[serde(default)]
+    llm_think: bool,
+
+    // Chat context window
+    #[serde(default = "default_chat_context_limit")]
+    chat_context_limit: usize,
 }
 
 impl Default for Settings {
@@ -97,6 +162,18 @@ impl Default for Settings {
             max_agent_iterations: 6,
             shell_enabled: true,
             admin_password: "puterra2026".to_string(),
+
+            timeout_agent: 120,
+            timeout_web_fetch: 15,
+            timeout_web_search: 15,
+            timeout_image: 30,
+            timeout_llm_test: 60,
+
+            llm_temperature: 0.7,
+            llm_max_tokens: 4096,
+            llm_think: false,
+
+            chat_context_limit: 10,
         }
     }
 }
@@ -125,6 +202,7 @@ struct AppState {
     users: Mutex<HashMap<String, User>>,
     settings: Mutex<Settings>,
     sessions: Mutex<HashMap<String, Session>>,  // token -> Session
+    share_keys: Mutex<HashMap<String, ShareKey>>,
 }
 
 #[derive(Serialize)]
@@ -166,6 +244,19 @@ struct AgentRequest {
     history: Option<Vec<AgentChatMessage>>,
     model: Option<String>,
     username: Option<String>,
+    #[serde(default)]
+    share_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CreateShareKeyRequest {
+    token: String,
+    label: String,
+    api_url: String,
+    model: String,
+    api_key: String,
+    #[serde(default)]
+    max_uses: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -304,7 +395,7 @@ fn load_image(path: &str) -> Result<DynamicImage, String> {
             // Create a client that looks like a real browser (required by many sites)
             let client = reqwest::blocking::Client::builder()
                 .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                .timeout(std::time::Duration::from_secs(30))
+                .timeout(std::time::Duration::from_secs(current_settings().timeout_image))
                 .redirect(reqwest::redirect::Policy::limited(10))  // Follow redirects
                 .build()
                 .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
@@ -1147,7 +1238,7 @@ async fn do_ollama_web_fetch(client: &reqwest::Client, url: &str, settings: &Set
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&body)
-        .timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(current_settings().timeout_web_fetch))
         .send()
         .await
         .map_err(|e| format!("Ollama fetch error: {}", e))?;
@@ -1169,7 +1260,7 @@ async fn do_direct_web_fetch(client: &reqwest::Client, url: &str) -> Result<Stri
         .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
         .header("Accept-Language", "en-US,en;q=0.5,tr;q=0.3")
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(current_settings().timeout_web_fetch))
         .send()
         .await
         .map_err(|e| format!("Fetch failed: {}", e))?;
@@ -1190,54 +1281,69 @@ async fn do_direct_web_fetch(client: &reqwest::Client, url: &str) -> Result<Stri
 }
 
 /// Call LLM with messages array and optional tools (native Ollama/OpenAI tool calling)
+/// Pass `share_key_override` to use a share key's LLM config instead of global settings
 async fn call_llm_chat(
     client: &reqwest::Client,
     messages: &[serde_json::Value],
     tools: Option<&[serde_json::Value]>,
     model: Option<&str>,
+    share_key_override: Option<&ShareKey>,
 ) -> Result<serde_json::Value, String> {
     let settings = current_settings();
 
-    // Select config based on active source
-    let (api_url, llm_model, api_key) = match settings.llm_active_source.as_str() {
-        "cloud" => (
-            settings.llm_api_url_cloud.as_str(),
-            model.unwrap_or(&settings.llm_model_cloud),
-            settings.llm_api_key_cloud.as_str(),
-        ),
-        _ => {
-            // Default to local
-            (
-                settings.llm_api_url_local.as_str(),
-                model.unwrap_or(&settings.llm_model_local),
-                settings.llm_api_key_local.as_str(),
-            )
+    // Select config: share key overrides global settings
+    let (api_url, llm_model, api_key): (String, String, String) = if let Some(sk) = share_key_override {
+        (
+            sk.api_url.clone(),
+            model.unwrap_or(&sk.model).to_string(),
+            sk.api_key.clone(),
+        )
+    } else {
+        match settings.llm_active_source.as_str() {
+            "cloud" => (
+                settings.llm_api_url_cloud.clone(),
+                model.unwrap_or(&settings.llm_model_cloud).to_string(),
+                settings.llm_api_key_cloud.clone(),
+            ),
+            _ => (
+                settings.llm_api_url_local.clone(),
+                model.unwrap_or(&settings.llm_model_local).to_string(),
+                settings.llm_api_key_local.clone(),
+            ),
         }
     };
 
     // Build chat endpoint URL
-    // Ollama (local or cloud) uses /chat, OpenAI uses /chat/completions
     let base = api_url.trim_end_matches('/');
     let chat_url = if base.ends_with("/chat") || base.ends_with("/chat/completions") {
-        // URL already includes the endpoint path
         base.to_string()
     } else if settings.llm_provider == "openai" && !base.contains("ollama.com") {
-        // OpenAI-compatible (not Ollama Cloud)
         format!("{}/chat/completions", base)
     } else {
-        // Ollama local or Ollama Cloud
         format!("{}/chat", base)
     };
 
     let mut body = serde_json::json!({
         "model": llm_model,
         "messages": messages,
-        "stream": false
+        "stream": false,
     });
 
-    // Disable thinking for local models to speed up responses
-    if settings.llm_active_source == "local" {
+    // Think mode: cloud models think by default; only set explicitly when user toggles it
+    let is_cloud = share_key_override.map(|sk| sk.api_url.contains("ollama.com")).unwrap_or(settings.llm_active_source == "cloud");
+    if settings.llm_think {
+        body["think"] = serde_json::json!(true);
+    } else if !is_cloud {
+        // Disable thinking for local models to keep responses fast
         body["think"] = serde_json::json!(false);
+    }
+
+    // Only send generation params if explicitly non-default (some APIs reject unknown fields)
+    if (settings.llm_temperature - 0.7).abs() > 0.001 {
+        body["temperature"] = serde_json::json!(settings.llm_temperature);
+    }
+    if settings.llm_max_tokens != 4096 {
+        body["num_predict"] = serde_json::json!(settings.llm_max_tokens);
     }
 
     if let Some(tools) = tools {
@@ -1255,6 +1361,7 @@ async fn call_llm_chat(
         req = req.header("Authorization", format!("Bearer {}", api_key));
     }
 
+    eprintln!("[LLM] Request body: {}", serde_json::to_string(&body).unwrap_or_default().chars().take(500).collect::<String>());
     match req.send().await {
         Ok(response) => {
             match response.text().await {
@@ -1311,7 +1418,7 @@ async fn call_llm_chat(
 /// Simple LLM call (for chat endpoint) - backwards compatible
 async fn call_llm(client: &reqwest::Client, prompt: &str, model: Option<&str>) -> String {
     let messages = vec![serde_json::json!({"role": "user", "content": prompt})];
-    match call_llm_chat(client, &messages, None, model).await {
+    match call_llm_chat(client, &messages, None, model, None).await {
         Ok(json) => {
             json.get("message")
                 .and_then(|m| m.get("content"))
@@ -1420,12 +1527,20 @@ async fn validate_token(data: web::Data<AppState>, req: actix_web::HttpRequest) 
 // ============================================================
 
 #[get("/api/files/{username}")]
-async fn list_files(path: web::Path<String>) -> impl Responder {
+async fn list_files(path: web::Path<String>, query: web::Query<std::collections::HashMap<String, String>>) -> impl Responder {
     let username = path.into_inner();
     let user_dir = get_user_dir(&username);
     std::fs::create_dir_all(&user_dir).ok();
 
-    let files: Vec<FileEntry> = std::fs::read_dir(&user_dir)
+    // Optional subfolder path from query param ?path=folder/subfolder
+    let sub_path = query.get("path").map(|p| p.trim_matches('/')).unwrap_or("");
+    let dir = if sub_path.is_empty() || sub_path.contains("..") {
+        user_dir.clone()
+    } else {
+        format!("{}/{}", user_dir, sub_path)
+    };
+
+    let files: Vec<FileEntry> = std::fs::read_dir(&dir)
         .map(|entries| {
             entries.filter_map(|e| e.ok())
                 .filter(|e| !e.file_name().to_string_lossy().starts_with("._"))
@@ -1459,7 +1574,7 @@ async fn delete_items(body: web::Json<DeleteRequest>) -> impl Responder {
     let user_dir = get_user_dir(&body.username);
     let mut deleted = 0;
     for name in &body.names {
-        if name.contains("..") || name.contains('/') { continue; }
+        if name.contains("..") { continue; }
         let path = format!("{}/{}", user_dir, name);
         if std::fs::remove_file(&path).is_ok() || std::fs::remove_dir_all(&path).is_ok() { deleted += 1; }
     }
@@ -1469,7 +1584,7 @@ async fn delete_items(body: web::Json<DeleteRequest>) -> impl Responder {
 #[post("/api/files/rename")]
 async fn rename_item(body: web::Json<RenameRequest>) -> impl Responder {
     let user_dir = get_user_dir(&body.username);
-    if body.old_name.contains("..") || body.old_name.contains('/') || body.new_name.contains("..") || body.new_name.contains('/') {
+    if body.old_name.contains("..") || body.new_name.contains("..") {
         return HttpResponse::BadRequest().json(serde_json::json!({ "success": false, "error": "Invalid name" }));
     }
     match std::fs::rename(format!("{}/{}", user_dir, body.old_name), format!("{}/{}", user_dir, body.new_name)) {
@@ -1504,10 +1619,10 @@ async fn write_file(body: web::Json<WriteRequest>) -> impl Responder {
 }
 
 /// Download/serve a file (for binary files like PDF, images)
-#[get("/api/files/download/{username}/{filename}")]
+#[get("/api/files/download/{username}/{filename:.*}")]
 async fn download_file(path: web::Path<(String, String)>) -> impl Responder {
     let (username, filename) = path.into_inner();
-    if filename.contains("..") || filename.contains('/') {
+    if filename.contains("..") {
         return HttpResponse::BadRequest().body("Invalid filename");
     }
     let file_path = format!("{}/{}", get_user_dir(&username), filename);
@@ -1625,7 +1740,7 @@ async fn upload_file(path: web::Path<String>, mut payload: Multipart) -> impl Re
 async fn web_search(body: web::Json<WebSearchRequest>) -> impl Responder {
     let max_results = body.max_results.unwrap_or(8);
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(current_settings().timeout_web_search))
         .build()
         .unwrap_or_default();
 
@@ -1641,7 +1756,7 @@ async fn web_search(body: web::Json<WebSearchRequest>) -> impl Responder {
 #[post("/api/web_fetch")]
 async fn web_fetch(body: web::Json<FetchRequest>) -> impl Responder {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(current_settings().timeout_web_fetch))
         .build()
         .unwrap_or_default();
 
@@ -1720,7 +1835,7 @@ async fn memory(body: web::Json<MemoryRequest>) -> impl Responder {
 #[post("/api/chat")]
 async fn chat(body: web::Json<ChatRequest>) -> impl Responder {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(current_settings().timeout_llm_test))
         .build()
         .unwrap_or_default();
 
@@ -1770,6 +1885,26 @@ Tool Reuse Strategy:
         now.format("%Y-%m-%d %H:%M UTC"),
         username
     )
+}
+
+/// Some APIs (e.g. GLM/Zhipu) require property `type` as ["string"] instead of "string".
+/// Walk through tool definitions and wrap string type values inside `properties` as arrays.
+fn normalize_tool_property_types(tools: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    tools.into_iter().map(|mut tool| {
+        if let Some(props) = tool
+            .get_mut("function")
+            .and_then(|f| f.get_mut("parameters"))
+            .and_then(|p| p.get_mut("properties"))
+            .and_then(|p| p.as_object_mut())
+        {
+            for prop in props.values_mut() {
+                if let Some(t) = prop.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()) {
+                    prop["type"] = serde_json::json!([t]);
+                }
+            }
+        }
+        tool
+    }).collect()
 }
 
 /// Build native tool definitions for Ollama/OpenAI tool calling API
@@ -1861,10 +1996,10 @@ fn build_tool_definitions(username: &str) -> Vec<serde_json::Value> {
                 "description": "Create an empty file or folder",
                 "parameters": {
                     "type": "object",
-                    "required": ["name", "type"],
+                    "required": ["name", "kind"],
                     "properties": {
                         "name": {"type": "string", "description": "File or folder name"},
-                        "type": {"type": "string", "description": "Either 'file' or 'folder'", "enum": ["file", "folder"]}
+                        "kind": {"type": "string", "description": "Either 'file' or 'folder'", "enum": ["file", "folder"]}
                     }
                 }
             }
@@ -1878,7 +2013,22 @@ fn build_tool_definitions(username: &str) -> Vec<serde_json::Value> {
                     "type": "object",
                     "required": ["name"],
                     "properties": {
-                        "name": {"type": "string", "description": "File or folder name to delete"}
+                        "name": {"type": "string", "description": "File or folder name to delete. Can include path like 'folder/file.txt'"}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "file_move",
+                "description": "Move or rename a file or folder. Use this to move files between folders.",
+                "parameters": {
+                    "type": "object",
+                    "required": ["source", "destination"],
+                    "properties": {
+                        "source": {"type": "string", "description": "Source path, e.g. 'file.pdf' or 'folder/file.pdf'"},
+                        "destination": {"type": "string", "description": "Destination path, e.g. 'travel/file.pdf' or 'new_name.pdf'"}
                     }
                 }
             }
@@ -1997,7 +2147,7 @@ fn build_tool_definitions(username: &str) -> Vec<serde_json::Value> {
         }
     }
 
-    tools
+    normalize_tool_property_types(tools)
 }
 
 /// Execute a tool directly (no HTTP calls to self)
@@ -2076,7 +2226,7 @@ async fn execute_tool(
 
         "file_read" => {
             let name = input.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            if name.is_empty() || name.contains("..") || name.contains('/') {
+            if name.is_empty() || name.contains("..") {
                 return "Error: valid file name is required".to_string();
             }
             match std::fs::read_to_string(format!("{}/{}", get_user_dir(username), name)) {
@@ -2089,12 +2239,15 @@ async fn execute_tool(
         "file_write" => {
             let name = input.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let content = input.get("content").and_then(|c| c.as_str()).unwrap_or("");
-            if name.is_empty() || name.contains("..") || name.contains('/') {
+            if name.is_empty() || name.contains("..") {
                 return "Error: valid file name is required".to_string();
             }
             let user_dir = get_user_dir(username);
-            std::fs::create_dir_all(&user_dir).ok();
-            match std::fs::write(format!("{}/{}", user_dir, name), content) {
+            let path = format!("{}/{}", user_dir, name);
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            match std::fs::write(&path, content) {
                 Ok(_) => format!("Written {} bytes to '{}'", content.len(), name),
                 Err(e) => format!("Error writing '{}': {}", name, e),
             }
@@ -2102,13 +2255,15 @@ async fn execute_tool(
 
         "file_create" => {
             let name = input.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let item_type = input.get("type").and_then(|t| t.as_str()).unwrap_or("file");
-            if name.is_empty() || name.contains("..") || name.contains('/') {
+            let item_type = input.get("kind").or_else(|| input.get("type")).and_then(|t| t.as_str()).unwrap_or("file");
+            if name.is_empty() || name.contains("..") {
                 return "Error: valid name is required".to_string();
             }
             let user_dir = get_user_dir(username);
-            std::fs::create_dir_all(&user_dir).ok();
             let path = format!("{}/{}", user_dir, name);
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
             match if item_type == "folder" { std::fs::create_dir(&path) } else { std::fs::write(&path, "").map(|_| ()) } {
                 Ok(_) => format!("Created {} '{}'", item_type, name),
                 Err(e) => format!("Error: {}", e),
@@ -2117,7 +2272,7 @@ async fn execute_tool(
 
         "file_delete" => {
             let name = input.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            if name.is_empty() || name.contains("..") || name.contains('/') {
+            if name.is_empty() || name.contains("..") {
                 return "Error: valid name is required".to_string();
             }
             let path = format!("{}/{}", get_user_dir(username), name);
@@ -2125,6 +2280,28 @@ async fn execute_tool(
                 format!("Deleted '{}'", name)
             } else {
                 format!("'{}' not found", name)
+            }
+        }
+
+        "file_move" => {
+            let source = input.get("source").and_then(|s| s.as_str()).unwrap_or("");
+            let destination = input.get("destination").and_then(|d| d.as_str()).unwrap_or("");
+            if source.is_empty() || destination.is_empty() {
+                return "Error: source and destination are required".to_string();
+            }
+            if source.contains("..") || destination.contains("..") {
+                return "Error: invalid path".to_string();
+            }
+            let user_dir = get_user_dir(username);
+            let src_path = format!("{}/{}", user_dir, source);
+            let dst_path = format!("{}/{}", user_dir, destination);
+            // Create parent directories for destination if needed
+            if let Some(parent) = std::path::Path::new(&dst_path).parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            match std::fs::rename(&src_path, &dst_path) {
+                Ok(_) => format!("Moved '{}' to '{}'", source, destination),
+                Err(e) => format!("Error moving file: {}", e),
             }
         }
 
@@ -2312,7 +2489,7 @@ You have access to powerful tools. You MUST use tools when you need real-time in
 5. **file_write** - Write content to a file
    Input: {{"name": "filename.txt", "content": "file content"}}
 6. **file_create** - Create an empty file or folder
-   Input: {{"name": "filename.txt", "type": "file"}}
+   Input: {{"name": "filename.txt", "kind": "file"}}
 7. **file_delete** - Delete a file
    Input: {{"name": "filename.txt"}}
 8. **shell_exec** - Execute a shell command
@@ -2382,18 +2559,20 @@ fn parse_react_response(response: &str) -> (String, Option<String>, Option<Strin
     (thought, action, action_input, None)
 }
 
-/// Agent with ReAct text-based fallback
+/// Agent with ReAct text-based fallback — streams thinking/tool events via tx in real-time
 async fn agent_react_fallback(
     client: &reqwest::Client,
     message: &str,
     history: &Option<Vec<AgentChatMessage>>,
     username: &str,
     model: Option<&str>,
-) -> (bool, String, Vec<AgentStep>) {
+    share_key: Option<&ShareKey>,
+    tx: &mpsc::Sender<String>,
+    step_num: &mut usize,
+) -> (bool, String) {
     let system_prompt = build_react_system_prompt(username);
     let settings = current_settings();
     let max_iterations = settings.max_agent_iterations;
-    let mut steps: Vec<AgentStep> = Vec::new();
 
     let mut conversation = String::new();
     if let Some(hist) = history {
@@ -2420,38 +2599,46 @@ async fn agent_react_fallback(
             system_prompt, conversation, scratchpad
         );
 
+        let _ = tx.send(sse_event(&serde_json::json!({"type": "status", "message": format!("Thinking... (step {})", *step_num + 1)}))).await;
+
         let messages = vec![serde_json::json!({"role": "user", "content": full_prompt})];
-        let llm_response = match call_llm_chat(client, &messages, None, model).await {
-            Ok(json) => json.get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(|c| c.as_str())
-                .unwrap_or("")
-                .to_string(),
-            Err(e) => return (false, format!("LLM Error: {}", e), steps),
+        let (llm_response, step_thinking) = match call_llm_chat(client, &messages, None, model, share_key).await {
+            Ok(json) => {
+                let msg = json.get("message").cloned().unwrap_or_default();
+                let (content, thinking) = extract_content(&msg);
+                (content, thinking)
+            },
+            Err(e) => return (false, format!("LLM Error: {}", e)),
         };
 
+        // Emit thinking immediately
+        if let Some(ref t) = step_thinking {
+            let _ = tx.send(sse_event(&serde_json::json!({"type": "thinking", "thinking": t, "step": *step_num}))).await;
+        }
+
         if llm_response.is_empty() {
-            return (false, "LLM returned empty response.".to_string(), steps);
+            return (false, "LLM returned empty response.".to_string());
         }
 
         let (thought, action, action_input, final_answer) = parse_react_response(&llm_response);
 
         if let Some(answer) = final_answer {
-            steps.push(AgentStep { thinking: None, thought, action: None, action_input: None, observation: None });
-            return (true, answer, steps);
+            *step_num += 1;
+            return (true, answer);
         }
 
         if let Some(ref act) = action {
             let input_str = action_input.as_deref().unwrap_or("{}");
+
+            // Emit tool_call before execution
+            let _ = tx.send(sse_event(&serde_json::json!({"type": "tool_call", "action": act, "action_input": input_str, "step": *step_num}))).await;
+
             let observation = execute_tool(act, input_str, username, client).await;
 
-            steps.push(AgentStep {
-                thinking: None,
-                thought: thought.clone(),
-                action: Some(act.clone()),
-                action_input: action_input.clone(),
-                observation: Some(observation.clone()),
-            });
+            // Emit tool_result after execution
+            let _ = tx.send(sse_event(&serde_json::json!({"type": "tool_result", "action": act, "observation": safe_truncate(&observation, 500), "step": *step_num}))).await;
+
+            *step_num += 1;
 
             scratchpad += &format!(
                 "Thought: {}\nAction: {}\nAction Input: {}\nObservation: {}\n\n",
@@ -2462,214 +2649,183 @@ async fn agent_react_fallback(
 
         // No structured output - return as-is
         let answer = if thought.is_empty() { llm_response.trim().to_string() } else { thought };
-        return (true, answer, steps);
+        return (true, answer);
     }
 
-    // Max iterations
+    // Max iterations summary
+    let _ = tx.send(sse_event(&serde_json::json!({"type": "status", "message": "Summarizing findings..."}))).await;
     let summary_prompt = format!(
         "{}\n\n## Conversation\n{}\n## Research Done\n{}\n\nProvide a Final Answer based on all observations above.",
         system_prompt, conversation, scratchpad
     );
     let messages = vec![serde_json::json!({"role": "user", "content": summary_prompt})];
-    let final_response = match call_llm_chat(client, &messages, None, model).await {
-        Ok(json) => json.get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_string(),
-        Err(e) => return (false, format!("Error: {}", e), steps),
+    let (final_response, summary_thinking) = match call_llm_chat(client, &messages, None, model, share_key).await {
+        Ok(json) => {
+            let msg = json.get("message").cloned().unwrap_or_default();
+            let (content, thinking) = extract_content(&msg);
+            (content, thinking)
+        },
+        Err(e) => return (false, format!("Error: {}", e)),
     };
+    if let Some(ref t) = summary_thinking {
+        let _ = tx.send(sse_event(&serde_json::json!({"type": "thinking", "thinking": t, "step": *step_num}))).await;
+    }
     let (_, _, _, final_answer) = parse_react_response(&final_response);
     let answer = final_answer.unwrap_or_else(|| final_response.trim().to_string());
 
-    (true, answer, steps)
+    (true, answer)
 }
 
-/// Extract content and thinking from LLM message
+/// Extract content and thinking from LLM message.
+/// Handles both dedicated `thinking` field (Ollama native) and <think>...</think> tags in content.
 fn extract_content(message: &serde_json::Value) -> (String, Option<String>) {
-    let content = message.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
-    let thinking = message.get("thinking").and_then(|t| t.as_str())
+    let raw_content = message.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
+
+    // 1. Dedicated `thinking` field (Ollama native think mode)
+    let native_thinking = message.get("thinking").and_then(|t| t.as_str())
         .filter(|t| !t.is_empty())
         .map(|t| t.to_string());
-    // If content is empty, use thinking as content fallback
-    let effective_content = if content.is_empty() {
+
+    // 2. <think>...</think> tags embedded in content (DeepSeek R1, QwQ, etc.)
+    let (tag_thinking, clean_content) = {
+        let re = regex::Regex::new(r"(?s)<think>(.*?)</think>").unwrap();
+        let mut thoughts = Vec::new();
+        for cap in re.captures_iter(&raw_content) {
+            let t = cap[1].trim().to_string();
+            if !t.is_empty() { thoughts.push(t); }
+        }
+        let cleaned = re.replace_all(&raw_content, "").trim().to_string();
+        if thoughts.is_empty() {
+            (None, raw_content.clone())
+        } else {
+            (Some(thoughts.join("\n\n")), cleaned)
+        }
+    };
+
+    let thinking = native_thinking.or(tag_thinking);
+    let content = if clean_content.is_empty() {
         thinking.clone().unwrap_or_default()
     } else {
-        content
+        clean_content
     };
-    (effective_content, thinking)
+
+    (content, thinking)
 }
 
-/// Agent endpoint - Native tool calling with ReAct fallback
+/// Helper: format SSE event
+fn sse_event(data: &serde_json::Value) -> String {
+    format!("data: {}\n\n", serde_json::to_string(data).unwrap_or_default())
+}
+
+/// Agent endpoint - SSE streaming with native tool calling and ReAct fallback
 #[post("/api/agent")]
-async fn agent_chat(body: web::Json<AgentRequest>) -> impl Responder {
-    let model = body.model.as_deref();
-    let username = body.username.as_deref().unwrap_or("guest");
+async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>) -> HttpResponse {
+    let message = body.message.clone();
+    let history = body.history.clone();
+    let model = body.model.clone();
+    let username = body.username.clone().unwrap_or_else(|| "guest".to_string());
 
-    let system_prompt = build_system_prompt(username);
-    let tool_defs = build_tool_definitions(username);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .unwrap_or_default();
-
-    let mut steps: Vec<AgentStep> = Vec::new();
-    let settings = current_settings();
-    let max_iterations = settings.max_agent_iterations;
-
-    // Build messages array with system prompt
-    let mut messages: Vec<serde_json::Value> = vec![
-        serde_json::json!({"role": "system", "content": system_prompt}),
-    ];
-
-    // Add conversation history
-    // Last 2 messages get full content (so agent can reference recent answers for "save as PDF" etc.)
-    // Older messages get truncated to save context window
-    if let Some(history) = &body.history {
-        let recent: Vec<&AgentChatMessage> = history.iter().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect();
-        let total = recent.len();
-        for (i, msg) in recent.iter().enumerate() {
-            let is_recent = i >= total.saturating_sub(4); // last 4 messages get full content
-            let content = if is_recent || msg.content.len() <= 2000 {
-                msg.content.clone()
-            } else {
-                format!("{}...", safe_truncate(&msg.content, 1000))
-            };
-            messages.push(serde_json::json!({"role": msg.role, "content": content}));
+    // Look up share key if provided — increment uses, validate active
+    let share_key_opt: Option<ShareKey> = body.share_key.as_deref().and_then(|key_id| {
+        let mut keys = app_data.share_keys.lock().unwrap();
+        let k = keys.get_mut(key_id)?;
+        if !k.active { return None; }
+        k.uses += 1;
+        if let Some(max) = k.max_uses {
+            if k.uses >= max { k.active = false; }
         }
-    }
+        let cloned = k.clone();
+        drop(keys);
+        // Save updated usage count (best-effort, don't block)
+        let all_keys = app_data.share_keys.lock().unwrap().clone();
+        save_share_keys(&all_keys);
+        Some(cloned)
+    });
 
-    // Add current user message
-    messages.push(serde_json::json!({"role": "user", "content": body.message}));
+    let (tx, rx) = mpsc::channel::<String>(64);
 
-    // --- First attempt: Native tool calling ---
-    let first_result = call_llm_chat(&client, &messages, Some(&tool_defs), model).await;
+    // Spawn the agent loop in a background task
+    tokio::spawn(async move {
+        let model_ref = model.as_deref();
+        let system_prompt = build_system_prompt(&username);
+        let tool_defs = build_tool_definitions(&username);
+        let settings = current_settings();
+        let max_iterations = settings.max_agent_iterations;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(settings.timeout_agent))
+            .build()
+            .unwrap_or_default();
+        let mut step_num: usize = 0;
 
-    // Check if native tool calling works
-    let native_works = match &first_result {
-        Ok(json) => {
-            let msg = json.get("message");
-            if let Some(m) = msg {
-                let has_content = m.get("content").and_then(|c| c.as_str()).map_or(false, |c| !c.is_empty());
-                let has_tools = m.get("tool_calls").and_then(|tc| tc.as_array()).map_or(false, |tc| !tc.is_empty());
-                has_content || has_tools
-            } else {
-                false
+        // Build messages array
+        let mut messages: Vec<serde_json::Value> = vec![
+            serde_json::json!({"role": "system", "content": system_prompt}),
+        ];
+
+        if let Some(hist) = &history {
+            let recent: Vec<&AgentChatMessage> = hist.iter().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect();
+            let total = recent.len();
+            for (i, msg) in recent.iter().enumerate() {
+                let is_recent = i >= total.saturating_sub(4);
+                let content = if is_recent || msg.content.len() <= 2000 {
+                    msg.content.clone()
+                } else {
+                    format!("{}...", safe_truncate(&msg.content, 1000))
+                };
+                messages.push(serde_json::json!({"role": msg.role, "content": content}));
             }
         }
-        Err(_) => false,
-    };
 
-    // If native tool calling didn't produce a useful response, fall back to ReAct
-    if !native_works {
-        let (success, answer, fallback_steps) =
-            agent_react_fallback(&client, &body.message, &body.history, username, model).await;
-        return HttpResponse::Ok().json(serde_json::json!({
-            "success": success,
-            "answer": answer,
-            "steps": fallback_steps
-        }));
-    }
+        messages.push(serde_json::json!({"role": "user", "content": message}));
 
-    // --- Native tool calling loop ---
-    let response_json = first_result.unwrap();
-    let message = response_json.get("message").unwrap().clone();
-    let (content, thinking) = extract_content(&message);
-    let tool_calls = message.get("tool_calls").and_then(|tc| tc.as_array()).cloned();
+        // --- First LLM call ---
+        let _ = tx.send(sse_event(&serde_json::json!({"type": "status", "message": "Sending query to LLM..."}))).await;
+        let first_result = call_llm_chat(&client, &messages, Some(&tool_defs), model_ref, share_key_opt.as_ref()).await;
 
-    // If first response has no tool calls, return directly
-    if tool_calls.is_none() || tool_calls.as_ref().map_or(true, |tc| tc.is_empty()) {
-        // Still include thinking as a step if present
-        if thinking.is_some() {
-            steps.push(AgentStep { thinking: thinking.clone(), thought: String::new(), action: None, action_input: None, observation: None });
+        let native_works = match &first_result {
+            Ok(json) => {
+                let msg = json.get("message");
+                if let Some(m) = msg {
+                    let has_content = m.get("content").and_then(|c| c.as_str()).map_or(false, |c| !c.is_empty());
+                    let has_tools = m.get("tool_calls").and_then(|tc| tc.as_array()).map_or(false, |tc| !tc.is_empty());
+                    has_content || has_tools
+                } else { false }
+            }
+            Err(_) => false,
+        };
+
+        // ReAct fallback — streams events in real-time via tx
+        if !native_works {
+            let (success, answer) =
+                agent_react_fallback(&client, &message, &history, &username, model_ref, share_key_opt.as_ref(), &tx, &mut step_num).await;
+            let _ = tx.send(sse_event(&serde_json::json!({"type": "answer", "answer": answer, "success": success}))).await;
+            let _ = tx.send(sse_event(&serde_json::json!({"type": "done"}))).await;
+            return;
         }
-        let answer = if content.is_empty() { "I couldn't generate a response.".to_string() } else { content };
-        return HttpResponse::Ok().json(serde_json::json!({
-            "success": true,
-            "answer": answer,
-            "steps": steps
-        }));
-    }
 
-    // Process first round of tool calls
-    let tool_calls = tool_calls.unwrap();
-    messages.push(message.clone());
+        let response_json = first_result.unwrap();
+        let msg = response_json.get("message").unwrap().clone();
+        let (content, thinking) = extract_content(&msg);
+        let tool_calls = msg.get("tool_calls").and_then(|tc| tc.as_array()).cloned();
 
-    for tc in &tool_calls {
-        let func = tc.get("function").unwrap_or(tc);
-        let tool_name = func.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-        let arguments = func.get("arguments").cloned().unwrap_or(serde_json::json!({}));
-        let args_str = if arguments.is_string() {
-            arguments.as_str().unwrap_or("{}").to_string()
-        } else {
-            serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string())
-        };
-
-        let observation = execute_tool(tool_name, &args_str, username, &client).await;
-
-        steps.push(AgentStep {
-            thinking: thinking.clone(),
-            thought: content.clone(),
-            action: Some(tool_name.to_string()),
-            action_input: Some(args_str.clone()),
-            observation: Some(observation.clone()),
-        });
-
-        messages.push(serde_json::json!({
-            "role": "tool",
-            "content": safe_truncate(&observation, 4000)
-        }));
-    }
-
-    // Continue tool calling loop for remaining iterations
-    for iteration in 1..max_iterations {
-        eprintln!("[Agent] Iteration {}/{}: Calling LLM...", iteration, max_iterations - 1);
-        let llm_result = call_llm_chat(&client, &messages, Some(&tool_defs), model).await;
-
-        let response_json = match llm_result {
-            Ok(json) => json,
-            Err(e) => {
-                eprintln!("[Agent] ❌ LLM Error: {}", e);
-                return HttpResponse::Ok().json(serde_json::json!({
-                    "success": false,
-                    "answer": format!("LLM Error: {}", e),
-                    "steps": steps
-                }));
-            }
-        };
-
-        let message = match response_json.get("message") {
-            Some(m) => m.clone(),
-            None => {
-                eprintln!("[Agent] No message in response, breaking loop");
-                break;
-            }
-        };
-
-        let (content, thinking) = extract_content(&message);
-        let tool_calls = message.get("tool_calls").and_then(|tc| tc.as_array()).cloned();
-
+        // Send thinking event
         if let Some(ref t) = thinking {
-            eprintln!("[Agent] 💭 Thinking: {}", safe_truncate(t, 100));
+            let _ = tx.send(sse_event(&serde_json::json!({"type": "thinking", "thinking": t, "step": step_num}))).await;
         }
 
+        // No tool calls - direct answer
         if tool_calls.is_none() || tool_calls.as_ref().map_or(true, |tc| tc.is_empty()) {
-            if thinking.is_some() {
-                steps.push(AgentStep { thinking: thinking.clone(), thought: String::new(), action: None, action_input: None, observation: None });
-            }
             let answer = if content.is_empty() { "I couldn't generate a response.".to_string() } else { content };
-            return HttpResponse::Ok().json(serde_json::json!({
-                "success": true,
-                "answer": answer,
-                "steps": steps
-            }));
+            let _ = tx.send(sse_event(&serde_json::json!({"type": "answer", "answer": answer, "success": true}))).await;
+            let _ = tx.send(sse_event(&serde_json::json!({"type": "done"}))).await;
+            return;
         }
 
+        // Process first round of tool calls
         let tool_calls = tool_calls.unwrap();
-        eprintln!("[Agent] 🔧 Calling {} tool(s)...", tool_calls.len());
-        messages.push(message.clone());
+        messages.push(msg.clone());
 
-        for (idx, tc) in tool_calls.iter().enumerate() {
+        for tc in &tool_calls {
             let func = tc.get("function").unwrap_or(tc);
             let tool_name = func.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
             let arguments = func.get("arguments").cloned().unwrap_or(serde_json::json!({}));
@@ -2679,46 +2835,134 @@ async fn agent_chat(body: web::Json<AgentRequest>) -> impl Responder {
                 serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string())
             };
 
-            eprintln!("[Agent]   [{}/{}] Executing: {} {}", idx + 1, tool_calls.len(), tool_name, safe_truncate(&args_str, 80));
-            let observation = execute_tool(tool_name, &args_str, username, &client).await;
-            eprintln!("[Agent]   ✓ Result: {}", safe_truncate(&observation, 100));
+            // Send tool_call event
+            let _ = tx.send(sse_event(&serde_json::json!({
+                "type": "tool_call", "action": tool_name, "action_input": args_str, "step": step_num
+            }))).await;
 
-            steps.push(AgentStep {
-                thinking: thinking.clone(),
-                thought: content.clone(),
-                action: Some(tool_name.to_string()),
-                action_input: Some(args_str.clone()),
-                observation: Some(observation.clone()),
-            });
+            let observation = execute_tool(tool_name, &args_str, &username, &client).await;
+
+            // Send tool_result event
+            let _ = tx.send(sse_event(&serde_json::json!({
+                "type": "tool_result", "action": tool_name, "observation": safe_truncate(&observation, 500), "step": step_num
+            }))).await;
 
             messages.push(serde_json::json!({
                 "role": "tool",
                 "content": safe_truncate(&observation, 4000)
             }));
+            step_num += 1;
         }
-    }
 
-    // Max iterations reached - ask for a summary with all gathered data
-    messages.push(serde_json::json!({
-        "role": "user",
-        "content": "Please provide your final answer now based on all the information you've gathered. Respond in the same language as the original question."
-    }));
-    let final_result = call_llm_chat(&client, &messages, None, model).await;
-    let answer = match final_result {
-        Ok(json) => {
-            let msg = json.get("message");
-            let content = msg.and_then(|m| m.get("content")).and_then(|c| c.as_str()).unwrap_or("");
-            if content.is_empty() {
-                // Some models put reasoning in "thinking" field
-                msg.and_then(|m| m.get("thinking")).and_then(|t| t.as_str()).unwrap_or("Max iterations reached.").to_string()
-            } else {
-                content.to_string()
+        // Continue tool calling loop
+        for iteration in 1..max_iterations {
+            eprintln!("[Agent] Iteration {}/{}: Calling LLM...", iteration, max_iterations - 1);
+            let _ = tx.send(sse_event(&serde_json::json!({"type": "status", "message": format!("LLM thinking... (iteration {})", iteration)}))).await;
+
+            let llm_result = call_llm_chat(&client, &messages, Some(&tool_defs), model_ref, share_key_opt.as_ref()).await;
+
+            let response_json = match llm_result {
+                Ok(json) => json,
+                Err(e) => {
+                    eprintln!("[Agent] ❌ LLM Error: {}", e);
+                    let _ = tx.send(sse_event(&serde_json::json!({"type": "error", "error": format!("LLM Error: {}", e)}))).await;
+                    let _ = tx.send(sse_event(&serde_json::json!({"type": "done"}))).await;
+                    return;
+                }
+            };
+
+            let msg = match response_json.get("message") {
+                Some(m) => m.clone(),
+                None => {
+                    eprintln!("[Agent] No message in response, breaking loop");
+                    break;
+                }
+            };
+
+            let (content, thinking) = extract_content(&msg);
+            let tool_calls = msg.get("tool_calls").and_then(|tc| tc.as_array()).cloned();
+
+            // Send thinking event
+            if let Some(ref t) = thinking {
+                eprintln!("[Agent] 💭 Thinking: {}", safe_truncate(t, 100));
+                let _ = tx.send(sse_event(&serde_json::json!({"type": "thinking", "thinking": t, "step": step_num}))).await;
+            }
+
+            // No tool calls - final answer
+            if tool_calls.is_none() || tool_calls.as_ref().map_or(true, |tc| tc.is_empty()) {
+                let answer = if content.is_empty() { "I couldn't generate a response.".to_string() } else { content };
+                let _ = tx.send(sse_event(&serde_json::json!({"type": "answer", "answer": answer, "success": true}))).await;
+                let _ = tx.send(sse_event(&serde_json::json!({"type": "done"}))).await;
+                return;
+            }
+
+            let tool_calls = tool_calls.unwrap();
+            eprintln!("[Agent] 🔧 Calling {} tool(s)...", tool_calls.len());
+            messages.push(msg.clone());
+
+            for (idx, tc) in tool_calls.iter().enumerate() {
+                let func = tc.get("function").unwrap_or(tc);
+                let tool_name = func.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                let arguments = func.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+                let args_str = if arguments.is_string() {
+                    arguments.as_str().unwrap_or("{}").to_string()
+                } else {
+                    serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string())
+                };
+
+                eprintln!("[Agent]   [{}/{}] Executing: {} {}", idx + 1, tool_calls.len(), tool_name, safe_truncate(&args_str, 80));
+
+                // Send tool_call event
+                let _ = tx.send(sse_event(&serde_json::json!({
+                    "type": "tool_call", "action": tool_name, "action_input": args_str, "step": step_num
+                }))).await;
+
+                let observation = execute_tool(tool_name, &args_str, &username, &client).await;
+                eprintln!("[Agent]   ✓ Result: {}", safe_truncate(&observation, 100));
+
+                // Send tool_result event
+                let _ = tx.send(sse_event(&serde_json::json!({
+                    "type": "tool_result", "action": tool_name, "observation": safe_truncate(&observation, 500), "step": step_num
+                }))).await;
+
+                messages.push(serde_json::json!({
+                    "role": "tool",
+                    "content": safe_truncate(&observation, 4000)
+                }));
+                step_num += 1;
             }
         }
-        Err(e) => format!("Error: {}", e),
-    };
 
-    HttpResponse::Ok().json(serde_json::json!({ "success": true, "answer": answer, "steps": steps }))
+        // Max iterations - ask for summary
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": "Please provide your final answer now based on all the information you've gathered. Respond in the same language as the original question."
+        }));
+        let final_result = call_llm_chat(&client, &messages, None, model_ref, share_key_opt.as_ref()).await;
+        let answer = match final_result {
+            Ok(json) => {
+                let m = json.get("message");
+                let c = m.and_then(|m| m.get("content")).and_then(|c| c.as_str()).unwrap_or("");
+                if c.is_empty() {
+                    m.and_then(|m| m.get("thinking")).and_then(|t| t.as_str()).unwrap_or("Max iterations reached.").to_string()
+                } else { c.to_string() }
+            }
+            Err(e) => format!("Error: {}", e),
+        };
+
+        let _ = tx.send(sse_event(&serde_json::json!({"type": "answer", "answer": answer, "success": true}))).await;
+        let _ = tx.send(sse_event(&serde_json::json!({"type": "done"}))).await;
+    });
+
+    // Create SSE streaming response from channel
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let body_stream = stream.map(|s| Ok::<_, actix_web::Error>(actix_web::web::Bytes::from(s)));
+
+    HttpResponse::Ok()
+        .content_type("text/event-stream")
+        .insert_header(("Cache-Control", "no-cache"))
+        .insert_header(("X-Accel-Buffering", "no"))
+        .streaming(body_stream)
 }
 
 // ============================================================
@@ -2774,14 +3018,18 @@ async fn run_code(body: web::Json<RunCodeRequest>) -> impl Responder {
     let user_dir = get_user_dir(username);
     std::fs::create_dir_all(&user_dir).ok();
 
+    // Helper: get absolute path so current_dir + relative arg doesn't double-up
+    let abs_user_dir = std::fs::canonicalize(&user_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&user_dir));
+
     match body.language.as_str() {
         "python" => {
-            let tmp_file = format!("{}/._run_tmp.py", user_dir);
+            let tmp_file = abs_user_dir.join("._run_tmp.py");
             std::fs::write(&tmp_file, &body.code).ok();
 
             match Command::new("python3")
                 .arg(&tmp_file)
-                .current_dir(&user_dir)
+                .current_dir(&abs_user_dir)
                 .output()
             {
                 Ok(output) => {
@@ -2805,12 +3053,12 @@ async fn run_code(body: web::Json<RunCodeRequest>) -> impl Responder {
         }
 
         "javascript" | "js" => {
-            let tmp_file = format!("{}/._run_tmp.js", user_dir);
+            let tmp_file = abs_user_dir.join("._run_tmp.js");
             std::fs::write(&tmp_file, &body.code).ok();
 
             match Command::new("node")
                 .arg(&tmp_file)
-                .current_dir(&user_dir)
+                .current_dir(&abs_user_dir)
                 .output()
             {
                 Ok(output) => {
@@ -2831,6 +3079,76 @@ async fn run_code(body: web::Json<RunCodeRequest>) -> impl Responder {
                     }))
                 }
             }
+        }
+
+        "shell" | "bash" | "sh" => {
+            let tmp_file = abs_user_dir.join("._run_tmp.sh");
+            std::fs::write(&tmp_file, &body.code).ok();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&tmp_file, std::fs::Permissions::from_mode(0o755)).ok();
+            }
+            match Command::new("bash")
+                .arg(&tmp_file)
+                .current_dir(&abs_user_dir)
+                .output()
+            {
+                Ok(output) => {
+                    std::fs::remove_file(&tmp_file).ok();
+                    HttpResponse::Ok().json(serde_json::json!({
+                        "success": output.status.success(),
+                        "stdout": String::from_utf8_lossy(&output.stdout),
+                        "stderr": String::from_utf8_lossy(&output.stderr),
+                        "code": output.status.code()
+                    }))
+                }
+                Err(e) => {
+                    std::fs::remove_file(&tmp_file).ok();
+                    HttpResponse::Ok().json(serde_json::json!({
+                        "success": false,
+                        "error": format!("bash not available: {}", e)
+                    }))
+                }
+            }
+        }
+
+        "typescript" | "ts" => {
+            let tmp_file = abs_user_dir.join("._run_tmp.ts");
+            std::fs::write(&tmp_file, &body.code).ok();
+            // Try ts-node first, fall back to node (strips types)
+            let ts_node = Command::new("npx")
+                .args(["--yes", "ts-node", "--transpile-only"])
+                .arg(&tmp_file)
+                .current_dir(&abs_user_dir)
+                .output();
+            let output = match ts_node {
+                Ok(o) if o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty() => o,
+                _ => {
+                    match Command::new("node")
+                        .arg(&tmp_file)
+                        .current_dir(&abs_user_dir)
+                        .output()
+                    {
+                        Ok(o) => o,
+                        Err(e) => {
+                            std::fs::remove_file(&tmp_file).ok();
+                            return HttpResponse::Ok().json(serde_json::json!({
+                                "success": false,
+                                "error": format!("Node.js not available: {}", e),
+                                "hint": "Install Node.js or ts-node to run TypeScript files."
+                            }));
+                        }
+                    }
+                }
+            };
+            std::fs::remove_file(&tmp_file).ok();
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": output.status.success(),
+                "stdout": String::from_utf8_lossy(&output.stdout),
+                "stderr": String::from_utf8_lossy(&output.stderr),
+                "code": output.status.code()
+            }))
         }
 
         _ => HttpResponse::BadRequest().json(serde_json::json!({
@@ -2883,6 +3201,127 @@ async fn save_custom_tool(body: web::Json<serde_json::Value>) -> impl Responder 
 }
 
 // ============================================================
+// SHARE KEYS
+// ============================================================
+
+/// Create a share key — caller must provide their session token for auth
+#[post("/api/share-keys")]
+async fn create_share_key(data: web::Data<AppState>, body: web::Json<CreateShareKeyRequest>) -> impl Responder {
+    let owner = {
+        let sessions = data.sessions.lock().unwrap();
+        match sessions.get(&body.token) {
+            Some(s) => s.username.clone(),
+            None => return HttpResponse::Unauthorized().json(serde_json::json!({"success":false,"error":"Unauthorized"})),
+        }
+    };
+    if body.label.trim().is_empty() || body.api_url.trim().is_empty() || body.model.trim().is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({"success":false,"error":"label, api_url and model are required"}));
+    }
+    let key_id = format!("sk_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+    let share_key = ShareKey {
+        id: key_id.clone(),
+        owner,
+        label: body.label.trim().to_string(),
+        api_url: body.api_url.trim().to_string(),
+        model: body.model.trim().to_string(),
+        api_key: body.api_key.clone(),
+        active: true,
+        uses: 0,
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        max_uses: body.max_uses,
+    };
+    let mut keys = data.share_keys.lock().unwrap();
+    keys.insert(key_id.clone(), share_key);
+    save_share_keys(&keys);
+    HttpResponse::Ok().json(serde_json::json!({"success":true,"key":key_id}))
+}
+
+/// List share keys owned by the authenticated user
+#[get("/api/share-keys")]
+async fn list_share_keys(data: web::Data<AppState>, req: actix_web::HttpRequest) -> impl Responder {
+    let token = req.headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_string();
+    let owner = {
+        let sessions = data.sessions.lock().unwrap();
+        match sessions.get(&token) {
+            Some(s) => s.username.clone(),
+            None => return HttpResponse::Unauthorized().json(serde_json::json!({"success":false,"error":"Unauthorized"})),
+        }
+    };
+    let keys = data.share_keys.lock().unwrap();
+    let mut user_keys: Vec<serde_json::Value> = keys.values()
+        .filter(|k| k.owner == owner)
+        .map(|k| serde_json::json!({
+            "id": k.id,
+            "label": k.label,
+            "api_url": k.api_url,
+            "model": k.model,
+            "active": k.active,
+            "uses": k.uses,
+            "created_at": k.created_at,
+            "max_uses": k.max_uses,
+        }))
+        .collect();
+    user_keys.sort_by(|a, b| b["created_at"].as_u64().cmp(&a["created_at"].as_u64()));
+    HttpResponse::Ok().json(serde_json::json!({"success":true,"keys":user_keys}))
+}
+
+/// Revoke (delete) a share key
+#[delete("/api/share-keys/{key_id}")]
+async fn revoke_share_key(data: web::Data<AppState>, path: web::Path<String>, req: actix_web::HttpRequest) -> impl Responder {
+    let key_id = path.into_inner();
+    let token = req.headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_string();
+    let owner = {
+        let sessions = data.sessions.lock().unwrap();
+        match sessions.get(&token) {
+            Some(s) => s.username.clone(),
+            None => return HttpResponse::Unauthorized().json(serde_json::json!({"success":false,"error":"Unauthorized"})),
+        }
+    };
+    let mut keys = data.share_keys.lock().unwrap();
+    match keys.get(&key_id) {
+        Some(k) if k.owner == owner => {
+            keys.remove(&key_id);
+            save_share_keys(&keys);
+            HttpResponse::Ok().json(serde_json::json!({"success":true}))
+        }
+        Some(_) => HttpResponse::Forbidden().json(serde_json::json!({"success":false,"error":"Not your key"})),
+        None => HttpResponse::NotFound().json(serde_json::json!({"success":false,"error":"Key not found"})),
+    }
+}
+
+/// Validate a share key — returns public info without the API key (used by recipients)
+#[get("/api/share-keys/validate/{key_id}")]
+async fn validate_share_key(data: web::Data<AppState>, path: web::Path<String>) -> impl Responder {
+    let key_id = path.into_inner();
+    let keys = data.share_keys.lock().unwrap();
+    match keys.get(&key_id) {
+        Some(k) if k.active => HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "owner": k.owner,
+            "label": k.label,
+            "model": k.model,
+            "api_url": k.api_url,
+            "uses": k.uses,
+        })),
+        Some(_) => HttpResponse::Ok().json(serde_json::json!({"success":false,"error":"Key is inactive or revoked"})),
+        None => HttpResponse::Ok().json(serde_json::json!({"success":false,"error":"Invalid share key"})),
+    }
+}
+
+// ============================================================
 // SETTINGS
 // ============================================================
 
@@ -2927,6 +3366,18 @@ async fn get_settings() -> impl Responder {
             "search_engine": settings.search_engine,
             "max_agent_iterations": settings.max_agent_iterations,
             "shell_enabled": settings.shell_enabled,
+
+            "timeout_agent": settings.timeout_agent,
+            "timeout_web_fetch": settings.timeout_web_fetch,
+            "timeout_web_search": settings.timeout_web_search,
+            "timeout_image": settings.timeout_image,
+            "timeout_llm_test": settings.timeout_llm_test,
+
+            "llm_temperature": settings.llm_temperature,
+            "llm_max_tokens": settings.llm_max_tokens,
+            "llm_think": settings.llm_think,
+
+            "chat_context_limit": settings.chat_context_limit,
         }
     }))
 }
@@ -2997,6 +3448,40 @@ async fn update_settings(data: web::Data<AppState>, body: web::Json<serde_json::
         }
     }
 
+    // Timeouts
+    if let Some(v) = body.get("timeout_agent").and_then(|v| v.as_u64()) {
+        settings.timeout_agent = v.clamp(10, 600);
+    }
+    if let Some(v) = body.get("timeout_web_fetch").and_then(|v| v.as_u64()) {
+        settings.timeout_web_fetch = v.clamp(5, 120);
+    }
+    if let Some(v) = body.get("timeout_web_search").and_then(|v| v.as_u64()) {
+        settings.timeout_web_search = v.clamp(5, 120);
+    }
+    if let Some(v) = body.get("timeout_image").and_then(|v| v.as_u64()) {
+        settings.timeout_image = v.clamp(5, 120);
+    }
+    if let Some(v) = body.get("timeout_llm_test").and_then(|v| v.as_u64()) {
+        settings.timeout_llm_test = v.clamp(10, 300);
+    }
+
+    // LLM generation
+    if let Some(v) = body.get("llm_temperature").and_then(|v| v.as_f64()) {
+        settings.llm_temperature = (v * 10.0).round() / 10.0; // round to 1 decimal
+        settings.llm_temperature = settings.llm_temperature.clamp(0.0, 2.0);
+    }
+    if let Some(v) = body.get("llm_max_tokens").and_then(|v| v.as_u64()) {
+        settings.llm_max_tokens = v.clamp(256, 32768);
+    }
+    if let Some(v) = body.get("llm_think").and_then(|v| v.as_bool()) {
+        settings.llm_think = v;
+    }
+
+    // Chat context
+    if let Some(v) = body.get("chat_context_limit").and_then(|v| v.as_u64()) {
+        settings.chat_context_limit = (v as usize).clamp(1, 50);
+    }
+
     save_settings(&settings);
 
     HttpResponse::Ok().json(serde_json::json!({ "success": true, "message": "Settings saved" }))
@@ -3006,7 +3491,7 @@ async fn update_settings(data: web::Data<AppState>, body: web::Json<serde_json::
 #[post("/api/settings/test_llm")]
 async fn test_llm() -> impl Responder {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(current_settings().timeout_llm_test))
         .build()
         .unwrap_or_default();
 
@@ -3049,6 +3534,7 @@ async fn main() -> std::io::Result<()> {
         users: Mutex::new(HashMap::new()),
         settings: Mutex::new(settings.clone()),
         sessions: Mutex::new(HashMap::new()),
+        share_keys: Mutex::new(load_share_keys()),
     });
 
     app_state.users.lock().unwrap().insert("admin".to_string(), User {
@@ -3096,6 +3582,10 @@ async fn main() -> std::io::Result<()> {
             .service(test_llm)
             .service(tools_list)
             .service(health)
+            .service(validate_share_key)
+            .service(create_share_key)
+            .service(list_share_keys)
+            .service(revoke_share_key)
             .service(fs::Files::new("/static", "public"))
             .default_service(web::route().to(|| async {
                 fs::NamedFile::open("public/index.html")
