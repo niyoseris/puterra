@@ -21,7 +21,7 @@
         .desktop-bg {
             position: fixed;
             top: 0; left: 0; right: 0; bottom: 0;
-            background-image: url('Cyprus.png');
+            background-image: url('/static/Cyprus.png');
             background-size: cover;
             background-position: center;
             background-repeat: no-repeat;
@@ -859,20 +859,36 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            padding: 12px 8px;
+            padding: 8px 6px;
             border-radius: 8px;
             cursor: pointer;
             transition: background 0.15s;
             text-align: center;
+            user-select: none;
         }
-        
+
         .file-item:hover {
             background: rgba(255, 255, 255, 0.1);
         }
-        
+
         .file-item.selected {
-            background: rgba(99, 102, 241, 0.3);
-            border: 1px solid rgba(99, 102, 241, 0.5);
+            background: rgba(99, 102, 241, 0.25);
+            outline: 1px solid rgba(99, 102, 241, 0.5);
+            border-radius: 8px;
+        }
+
+        .file-item.drag-over {
+            background: rgba(99, 102, 241, 0.35);
+            outline: 2px dashed rgba(99, 102, 241, 0.8);
+            border-radius: 8px;
+        }
+
+        .file-item[draggable="true"] {
+            cursor: grab;
+        }
+
+        .file-item.dragging {
+            opacity: 0.4;
         }
         
         .file-item i {
@@ -1529,7 +1545,14 @@
             } else {
                 html += files.map((file, i) => {
                     const filePath = currentPath ? `${currentPath}/${file.name}` : file.name;
+                    const dnd = file.is_dir
+                        ? `ondragover="onItemDragOver(event,true)" ondragleave="onItemDragLeave(event)" ondrop="onItemDrop(event,'${filePath}',null,null)"`
+                        : '';
                     return `<div class="file-item ${selectedItems.includes(i) ? 'selected' : ''}"
+                         draggable="true"
+                         ondragstart="onFileDragStart(event,'${filePath}','${file.name}')"
+                         ondragend="onFileDragEnd(event)"
+                         ${dnd}
                          onclick="selectItem(event, ${i})"
                          ondblclick="openFile('${filePath}', ${file.is_dir}, '${file.name}')">
                         <i class="fas ${file.is_dir ? 'fa-folder text-yellow-400' : getFileIcon(file.name)}"></i>
@@ -3615,7 +3638,14 @@ sys.stderr = io.StringIO()
                     const fullPath = path ? `${path}/${f.name}` : f.name;
                     const icon = f.is_dir ? 'fa-folder text-yellow-400' : getFileIcon(f.name);
                     const dblclick = f.is_dir ? `renderFolderInWindow('${wid}','${fullPath}','${rootPath}')` : `openFile('${fullPath}', false, '${f.name}')`;
+                    const dnd = f.is_dir
+                        ? `ondragover="onItemDragOver(event,true)" ondragleave="onItemDragLeave(event)" ondrop="onItemDrop(event,'${fullPath}','${wid}','${rootPath}')"`
+                        : '';
                     return `<div class="file-item folder-win-item"
+                         draggable="true"
+                         ondragstart="onFileDragStart(event,'${fullPath}','${f.name}')"
+                         ondragend="onFileDragEnd(event)"
+                         ${dnd}
                          onclick="selectFolderItem(this)"
                          ondblclick="${dblclick}"
                          oncontextmenu="event.stopPropagation();event.preventDefault();setFolderContext('${fullPath}','${f.name}',${f.is_dir},'${wid}','${path}','${rootPath}',event)"
@@ -3642,10 +3672,68 @@ sys.stderr = io.StringIO()
         }
 
         function selectFolderItem(el) {
-            // Deselect all siblings in the same grid, then select clicked item
             const grid = el.closest('.file-grid');
             if (grid) grid.querySelectorAll('.file-item').forEach(i => i.classList.remove('selected'));
             el.classList.add('selected');
+        }
+
+        /* ── Drag & Drop ── */
+        let _draggedFile = null; // { path, name, sourceGrid }
+
+        function onFileDragStart(event, filePath, fileName) {
+            _draggedFile = { path: filePath, name: fileName, sourceGrid: event.currentTarget.closest('.file-grid') };
+            event.dataTransfer.effectAllowed = 'move';
+            event.dataTransfer.setData('text/plain', filePath);
+            event.currentTarget.classList.add('dragging');
+        }
+
+        function onFileDragEnd(event) {
+            event.currentTarget.classList.remove('dragging');
+            document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+        }
+
+        function onItemDragOver(event, isDir) {
+            if (!_draggedFile) return;
+            if (!isDir) return; // only accept drops on folders
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'move';
+            event.currentTarget.classList.add('drag-over');
+        }
+
+        function onItemDragLeave(event) {
+            event.currentTarget.classList.remove('drag-over');
+        }
+
+        async function onItemDrop(event, destFolderPath, wid, rootPath) {
+            event.preventDefault();
+            event.currentTarget.classList.remove('drag-over');
+            if (!_draggedFile) return;
+
+            const src = _draggedFile.path;
+            const dest = `${destFolderPath}/${_draggedFile.name}`;
+            _draggedFile = null;
+
+            if (src === dest) return;
+
+            const username = currentUser?.username || 'guest';
+            try {
+                const res = await fetch(`${API}/files/rename`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}` },
+                    body: JSON.stringify({ username, old_name: src, new_name: dest })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(`Moved to ${destFolderPath.split('/').pop()}`, 'success');
+                    // Refresh both main grid and any folder windows
+                    loadFiles(currentPath);
+                    if (wid && rootPath) window.renderFolderInWindow(wid, destFolderPath, rootPath);
+                } else {
+                    showToast(data.error || 'Move failed', 'error');
+                }
+            } catch (e) {
+                showToast('Move failed', 'error');
+            }
         }
 
         async function deleteFolderItem(fullPath, wid, currentPath, rootPath) {
