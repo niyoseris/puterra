@@ -59,7 +59,7 @@ fn save_share_keys(keys: &HashMap<String, ShareKey>) {
     std::fs::write(SHARE_KEYS_PATH, serde_json::to_string_pretty(keys).unwrap_or_default()).ok();
 }
 
-fn default_timeout_agent() -> u64 { 120 }
+fn default_timeout_agent() -> u64 { 300 }
 fn default_timeout_web_fetch() -> u64 { 15 }
 fn default_timeout_web_search() -> u64 { 15 }
 fn default_timeout_image() -> u64 { 30 }
@@ -1657,6 +1657,103 @@ async fn download_file(path: web::Path<(String, String)>) -> impl Responder {
     }
 }
 
+/// Serve user files for the HTML viewer (auth via token query param for iframe compatibility)
+/// Relative URLs in HTML files resolve naturally: ./style.css → /api/files/view/user/dir/style.css
+#[get("/api/files/view/{username}/{path:.*}")]
+async fn view_file(
+    req_path: web::Path<(String, String)>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let (username, file_path) = req_path.into_inner();
+    if file_path.contains("..") {
+        return HttpResponse::Forbidden().body("Forbidden");
+    }
+
+    // Auth: token from query param (iframes can't send Authorization headers)
+    let token = query.get("token").cloned().unwrap_or_default();
+    let valid = {
+        let sessions = data.sessions.lock().unwrap();
+        sessions.get(&token).map(|s| s.username == username).unwrap_or(false)
+    };
+    if !valid {
+        return HttpResponse::Unauthorized()
+            .content_type("text/html")
+            .body("<html><body style='font-family:sans-serif;color:#ef4444;padding:2rem'><h2>401 – Unauthorized</h2><p>Invalid or expired session token.</p></body></html>");
+    }
+
+    let full_path = format!("{}/{}", get_user_dir(&username), file_path);
+    match std::fs::read(&full_path) {
+        Ok(bytes) => {
+            let ext = std::path::Path::new(&full_path)
+                .extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+
+            let mime = match ext.as_str() {
+                "html" | "htm" | "xhtml" => "text/html; charset=utf-8",
+                "js"  | "mjs"  | "cjs"  => "application/javascript; charset=utf-8",
+                "css"                    => "text/css; charset=utf-8",
+                "wasm"                   => "application/wasm",
+                "json"                   => "application/json; charset=utf-8",
+                "svg"                    => "image/svg+xml",
+                "png"                    => "image/png",
+                "jpg" | "jpeg"           => "image/jpeg",
+                "gif"                    => "image/gif",
+                "webp"                   => "image/webp",
+                "ico"                    => "image/x-icon",
+                "txt"                    => "text/plain; charset=utf-8",
+                "xml"                    => "application/xml",
+                _                        => "application/octet-stream",
+            };
+
+            // For HTML files: inject a <base> tag so relative assets resolve via this endpoint
+            if matches!(ext.as_str(), "html" | "htm" | "xhtml") {
+                if let Ok(mut html) = String::from_utf8(bytes.clone()) {
+                    // Build base URL: everything up to (but not including) the filename
+                    let dir_part = if let Some(pos) = file_path.rfind('/') {
+                        &file_path[..=pos]
+                    } else {
+                        ""
+                    };
+                    let token_val = token.as_str();
+                    // Keep the token propagating through relative fetches by rewriting script/link srcs is hard,
+                    // so we just set <base href> pointing to the view endpoint directory.
+                    // Note: assets must use ?token= for auth – we inject a tiny bootstrap script for that.
+                    let base_url = format!("/api/files/view/{}/{}", username, dir_part);
+                    let inject = format!(
+                        r#"<base href="{base_url}"><script>
+window.__PUTERRA_TOKEN__="{token_val}";
+// Rewrite fetch/XHR so relative requests carry the token automatically
+const _origFetch=window.fetch;
+window.fetch=function(url,...args){{
+  const u=typeof url==='string'&&!url.startsWith('http')&&!url.startsWith('//')?url+(url.includes('?')?'&':'?')+'token={token_val}':url;
+  return _origFetch(u,...args);
+}};
+</script>"#,
+                        base_url = base_url,
+                        token_val = token_val,
+                    );
+                    // Insert after <head> or before </head> or prepend
+                    let patched = if let Some(pos) = html.find("<head>").or_else(|| html.find("<HEAD>")) {
+                        html.insert_str(pos + 6, &inject);
+                        html
+                    } else {
+                        format!("{}{}", inject, html)
+                    };
+                    return HttpResponse::Ok().content_type(mime).body(patched);
+                }
+            }
+
+            HttpResponse::Ok().content_type(mime).body(bytes)
+        }
+        Err(_) => HttpResponse::NotFound()
+            .content_type("text/html")
+            .body(format!(
+                "<html><body style='font-family:sans-serif;color:#ef4444;padding:2rem'><h2>404 – Not Found</h2><p>{}</p></body></html>",
+                file_path
+            )),
+    }
+}
+
 /// Upload file(s) via multipart form data
 #[post("/api/files/upload/{username}")]
 async fn upload_file(path: web::Path<String>, mut payload: Multipart) -> impl Responder {
@@ -1835,7 +1932,7 @@ async fn memory(body: web::Json<MemoryRequest>) -> impl Responder {
 #[post("/api/chat")]
 async fn chat(body: web::Json<ChatRequest>) -> impl Responder {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(current_settings().timeout_llm_test))
+        .timeout(std::time::Duration::from_secs(current_settings().timeout_agent))
         .build()
         .unwrap_or_default();
 
@@ -2147,6 +2244,16 @@ fn build_tool_definitions(username: &str) -> Vec<serde_json::Value> {
                 if let Ok(tool_def) = serde_json::from_str::<serde_json::Value>(&tool_json) {
                     let name = tool_def.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
                     let desc = tool_def.get("description").and_then(|d| d.as_str()).unwrap_or("Custom tool");
+                    // Extract properties and required from the tool's parameters object
+                    let params_val = tool_def.get("parameters");
+                    let props = params_val
+                        .and_then(|p| p.get("properties"))
+                        .cloned()
+                        .unwrap_or(serde_json::json!({}));
+                    let required = params_val
+                        .and_then(|p| p.get("required"))
+                        .cloned()
+                        .unwrap_or(serde_json::json!([]));
                     tools.push(serde_json::json!({
                         "type": "function",
                         "function": {
@@ -2154,7 +2261,8 @@ fn build_tool_definitions(username: &str) -> Vec<serde_json::Value> {
                             "description": desc,
                             "parameters": {
                                 "type": "object",
-                                "properties": tool_def.get("parameters").cloned().unwrap_or(serde_json::json!({}))
+                                "properties": props,
+                                "required": required
                             }
                         }
                     }));
@@ -3616,6 +3724,7 @@ async fn main() -> std::io::Result<()> {
             .service(read_file)
             .service(write_file)
             .service(download_file)
+            .service(view_file)
             .service(upload_file)
             .service(web_search)
             .service(web_fetch)
