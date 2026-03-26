@@ -1254,7 +1254,7 @@
 
         function deleteConversation(id, event) {
             event.stopPropagation();
-            if (!confirm('Bu sohbeti silmek istediğinize emin misiniz?')) return;
+            if (!confirm('Are you sure you want to delete this conversation?')) return;
             conversations = conversations.filter(c => c.id !== id);
             saveConversations();
             if (id === activeConversationId) {
@@ -1341,7 +1341,7 @@
 
         // Clear chat history (clears active conversation only)
         function clearChatHistory() {
-            if (!confirm('Sohbet geçmişini temizlemek istediğinize emin misiniz?')) return;
+            if (!confirm('Are you sure you want to clear chat history?')) return;
             chatHistory = [];
             const messagesDiv = document.getElementById('chatMessages');
             if (messagesDiv) {
@@ -2030,11 +2030,11 @@
             input.style.height = '40px';
 
             // Handle special commands before adding to history
-            if (/^(?:new chat|yeni sohbet)$/i.test(message)) {
+            if (/^(?:new chat)$/i.test(message)) {
                 newConversation();
                 return;
             }
-            if (/^(?:clear|temizle)$/i.test(message)) {
+            if (/^(?:clear)$/i.test(message)) {
                 clearChatHistory();
                 return;
             }

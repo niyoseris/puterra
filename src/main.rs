@@ -161,7 +161,7 @@ impl Default for Settings {
             search_engine: "duckduckgo".to_string(),
             max_agent_iterations: 6,
             shell_enabled: true,
-            admin_password: "puterra2026".to_string(),
+            admin_password: "changeme".to_string(),
 
             timeout_agent: 120,
             timeout_web_fetch: 15,
@@ -506,7 +506,7 @@ fn load_image(path: &str) -> Result<DynamicImage, String> {
 fn generate_pdf(title: &str, content: &str, output_path: &str) -> Result<String, String> {
     let (doc, page1, layer1) = PdfDocument::new(title, Mm(210.0), Mm(297.0), "Layer 1");
 
-    // Try to find a system TrueType font that supports Unicode/Turkish
+    // Try to find a system TrueType font that supports Unicode
     let font_paths = vec![
         "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/Library/Fonts/Arial.ttf",

@@ -3,3 +3,9 @@ workspace/
 .meta.json
 .env
 .DS_Store
+
+# Runtime data — contains API keys and user files, never commit
+data/settings.json
+data/share_keys.json
+data/users/
+data/memory/
