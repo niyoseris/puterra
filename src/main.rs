@@ -219,7 +219,7 @@ struct LoginRequest { username: String, password: String }
 #[derive(Deserialize)]
 struct WebSearchRequest { query: String, max_results: Option<usize> }
 #[derive(Deserialize)]
-struct ShellRequest { command: String, cwd: Option<String> }
+struct ShellRequest { command: String, cwd: Option<String>, #[serde(default)] username: String }
 #[derive(Deserialize)]
 struct FetchRequest { url: String }
 #[derive(Deserialize)]
@@ -1880,7 +1880,9 @@ async fn shell_exec(body: web::Json<ShellRequest>) -> impl Responder {
     if !settings.shell_enabled {
         return HttpResponse::Forbidden().json(serde_json::json!({ "success": false, "error": "Shell is disabled in settings" }));
     }
-    let cwd = body.cwd.as_deref().unwrap_or("/tmp");
+    // Default to user's storage dir so relative paths in scripts save to user storage
+    let user_dir = if body.username.is_empty() { "/tmp".to_string() } else { get_user_dir(&body.username) };
+    let cwd = body.cwd.as_deref().unwrap_or(&user_dir);
     let dangerous = ["rm -rf", "mkfs", "dd if=", "> /dev/", "chmod 777", "chown root"];
     for d in dangerous {
         if body.command.contains(d) {
@@ -1971,8 +1973,21 @@ Rules:
 - Use markdown formatting in your answers
 - Be helpful and detailed
 - If run_python fails due to a missing library, tell the user which library is needed and ASK if they want you to install it. If they agree, install it with shell_exec (pip install <library>). Do NOT keep retrying with workarounds.
-- Files can only be saved to the user's cloud storage (flat names, no paths with slashes)
 - To create PDF files, ALWAYS use the create_pdf tool. NEVER use Python/reportlab/fpdf for PDFs. The create_pdf tool is built-in, reliable, and supports markdown.
+
+## File Storage — CRITICAL RULES
+ALL files you create MUST end up in the user's cloud storage so they can download them.
+
+**For text files:** Use `file_write` tool. Supports subpaths: `file_write(name="tasks/folder/file.txt", ...)`
+
+**For binary files created with run_python (videos, images, zip, etc.):**
+- `run_python` executes with the user's storage as the CURRENT WORKING DIRECTORY
+- ALWAYS use RELATIVE paths: `open('output.mp4', 'wb')` → saves to user storage ✅
+- NEVER use absolute paths: `open('/Users/.../output.mp4', 'wb')` → saves to server ❌
+- NEVER use `/tmp/`, `~/Desktop/`, or any absolute path
+- After creating the file with run_python, tell the user its name so they can find it in Files
+
+**For shell_exec:** shell runs in /tmp by default. If you must create files with shell_exec, pipe output through run_python instead, or explicitly use the user storage path returned by checking `shell_exec(command="pwd")` first.
 - The create_pdf tool supports images: ![alt](path). Use image_search to find reliable image URLs before creating PDFs.
 - For PDFs with images: FIRST use image_search to find working image URLs, THEN create the PDF. This avoids broken images from blocked URLs.
 - image_search tool: Use this to find direct image URLs for maps, diagrams, photos, etc. It returns URLs you can use directly in create_pdf.
@@ -1991,8 +2006,9 @@ For ANY task with 3+ steps, or that involves research, writing, data collection,
 **FIRST — always check for an existing task folder:**
 Before starting anything, run `file_list` and look for `tasks/{}-*` folders.
 - If a matching folder exists: read `plan.md` and `progress.md` IMMEDIATELY.
-  - If the user's NEW request is a continuation or update of the same topic → reuse the folder, update `plan.md` with the new goal, keep completed steps, continue from where you left off.
-  - If the user's request is completely unrelated → create a new folder for this new task.
+  - The user's new message is almost always a CONTINUATION or UPDATE of the existing task (e.g. "now make a video", "also add X", "change Y"). Treat it as an UPDATE unless it is completely unrelated.
+  - On UPDATE: reuse the folder, update `plan.md` with the new goal (keep ✅ completed steps), use `findings.md` to avoid re-doing research, add new steps, continue.
+  - Only create a new folder if the topic is genuinely unrelated to existing tasks.
 - If no matching folder exists: create one and start fresh.
 
 **At the START of a new task:**
@@ -2509,7 +2525,9 @@ async fn execute_tool(
             if dangerous.iter().any(|d| command.contains(d)) {
                 return "Error: command blocked for safety".to_string();
             }
-            match Command::new("sh").arg("-c").arg(command).current_dir("/tmp").output() {
+            let shell_cwd = get_user_dir(username);
+            std::fs::create_dir_all(&shell_cwd).ok();
+            match Command::new("sh").arg("-c").arg(command).current_dir(&shell_cwd).output() {
                 Ok(output) => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2728,11 +2746,10 @@ Final Answer: [your complete answer with markdown formatting]
 For ANY task with 3+ steps (research, writing, data collection, file creation):
 
 **FIRST — check existing task folder:** Look for `tasks/{}-*` folders.
-- Found + same topic → read plan.md & progress.md, reuse folder, continue from last incomplete step, leverage findings.md.
-- Found + different topic → create new folder.
+- Found → read plan.md & progress.md. The new message is almost always a CONTINUATION (e.g. "now make a video", "add X"). Treat as UPDATE: reuse folder, update plan.md, keep ✅ steps, use findings.md. Only create a new folder if completely unrelated.
 - Not found → create new folder.
 
-**When user UPDATES the task:** Read existing plan.md/progress.md → update goal → keep ✅ steps → add new steps → use findings.md to avoid repeating research.
+**When user UPDATES the task:** Read plan.md/progress.md → update goal → keep ✅ completed steps → add new steps → use findings.md (NEVER redo research already done).
 
 **New task folder:** `tasks/CONV_ID-slug/plan.md` (e.g. `tasks/{}-guide/`)
 
