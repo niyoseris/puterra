@@ -1988,34 +1988,40 @@ Tool Reuse Strategy:
 
 For ANY task with 3+ steps, or that involves research, writing, data collection, or file creation:
 
-**At the START of the task:**
-1. Create a task folder using YOUR Conversation ID as prefix: `tasks/CONV_ID-short-task-slug/`  (e.g. `tasks/{}-istanbul-guide/`)
-2. Write `tasks/FOLDER/plan.md` containing:
+**FIRST — always check for an existing task folder:**
+Before starting anything, run `file_list` and look for `tasks/{}-*` folders.
+- If a matching folder exists: read `plan.md` and `progress.md` IMMEDIATELY.
+  - If the user's NEW request is a continuation or update of the same topic → reuse the folder, update `plan.md` with the new goal, keep completed steps, continue from where you left off.
+  - If the user's request is completely unrelated → create a new folder for this new task.
+- If no matching folder exists: create one and start fresh.
+
+**At the START of a new task:**
+1. Create a task folder: `tasks/CONV_ID-short-task-slug/`  (e.g. `tasks/{}-istanbul-guide/`)
+2. Write `tasks/FOLDER/plan.md`:
    - ## Goal: what the user wants
-   - ## Steps: numbered list of every step needed
+   - ## Steps: numbered list of every step
    - ## Status: 🔄 In Progress
 
+**When the user UPDATES or CHANGES the task:**
+1. Read existing `plan.md` and `progress.md`
+2. Update `plan.md` with the new goal (keep ✅ completed steps)
+3. Add new steps as needed — do NOT discard previous findings
+4. Use `findings.md` to avoid repeating already-done research
+5. Continue from the first incomplete step
+
 **After EACH completed step:**
-- Update `tasks/FOLDER/progress.md` with:
-  - ✅ Completed steps (with brief findings)
-  - 🔄 Current step
-  - ⏳ Remaining steps
-- Save any important findings, URLs, data to `tasks/FOLDER/findings.md`
-- Save any created files (images, docs, data) into `tasks/FOLDER/`
+- Update `tasks/FOLDER/progress.md`: ✅ done / 🔄 current / ⏳ remaining
+- Append new findings to `tasks/FOLDER/findings.md`
+- Save created files into `tasks/FOLDER/`
 
-**If you encounter an ERROR or need to RESUME:**
-1. Run `file_list` and look for existing task folders under `tasks/`
-2. Read `progress.md` to see where you left off
-3. Read `findings.md` to recover previous research
-4. Continue from the last incomplete step — NEVER restart from scratch
+**On ERROR or unexpected stop:**
+1. Read `tasks/FOLDER/progress.md` → resume from last incomplete step
+2. Read `findings.md` → use existing research, NEVER redo completed work
 
-**At task COMPLETION:**
-- Update `plan.md` Status to: ✅ Complete
-- Write a short summary at the bottom of `progress.md`
-
-This ensures long tasks survive errors, restarts, and context limits."#,
+**At task COMPLETION:** Set `plan.md` Status to ✅ Complete."#,
         now.format("%Y-%m-%d %H:%M UTC"),
         username,
+        conv_id,
         conv_id,
         conv_id
     )
@@ -2721,19 +2727,21 @@ Final Answer: [your complete answer with markdown formatting]
 
 For ANY task with 3+ steps (research, writing, data collection, file creation):
 
-**START of task:** Create `tasks/CONV_ID-slug/plan.md` using YOUR Conversation ID (e.g. `tasks/{}-istanbul-guide/`).
+**FIRST — check existing task folder:** Look for `tasks/{}-*` folders.
+- Found + same topic → read plan.md & progress.md, reuse folder, continue from last incomplete step, leverage findings.md.
+- Found + different topic → create new folder.
+- Not found → create new folder.
 
-**After EACH step:** Update `tasks/FOLDER/progress.md`:
-- ✅ done steps (with findings)
-- 🔄 current step
-- ⏳ remaining steps
+**When user UPDATES the task:** Read existing plan.md/progress.md → update goal → keep ✅ steps → add new steps → use findings.md to avoid repeating research.
 
-Save findings to `tasks/FOLDER/findings.md`, created files to `tasks/FOLDER/`.
+**New task folder:** `tasks/CONV_ID-slug/plan.md` (e.g. `tasks/{}-guide/`)
 
-**On ERROR or RESUME:** Read `tasks/FOLDER/progress.md` → continue from last incomplete step. NEVER restart from scratch.
+**After EACH step:** Update `tasks/FOLDER/progress.md` (✅/🔄/⏳), append to findings.md.
+
+**On ERROR:** Read progress.md → resume from last incomplete step. NEVER restart.
 
 **On COMPLETION:** Mark plan.md as ✅ Complete."#,
-        now.format("%Y-%m-%d %H:%M UTC"), username, conv_id, conv_id)
+        now.format("%Y-%m-%d %H:%M UTC"), username, conv_id, conv_id, conv_id)
 }
 
 /// Parse ReAct-style response (fallback)
