@@ -754,13 +754,86 @@
             min-width: 0;
         }
         
+        /* Mobile sidebar toggle button – hidden on desktop */
+        .mobile-sidebar-toggle {
+            display: none;
+            background: none;
+            border: none;
+            color: #a5b4fc;
+            padding: 4px 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            align-items: center;
+            border-radius: 6px;
+            flex-shrink: 0;
+        }
+        .mobile-sidebar-toggle:hover { background: rgba(255,255,255,0.1); }
+
+        /* Mobile chat header strip – hidden on desktop */
+        .mobile-chat-header {
+            display: none;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 10px;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+            flex-shrink: 0;
+        }
+
+        /* Sidebar overlay backdrop – hidden by default */
+        .sidebar-overlay {
+            display: none;
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.55);
+            z-index: 99;
+        }
+
         @media (max-width: 768px) {
             .desktop-icon { width: 65px; padding: 8px; }
             .desktop-icon i { font-size: 1.8rem; }
             .desktop-icon span { font-size: 0.65rem; }
-            .window { min-width: 95% !important; width: 95% !important; }
+
+            /* Windows fill the entire viewport (minus taskbar) */
+            .window {
+                position: fixed !important;
+                top: 0 !important;
+                left: 0 !important;
+                width: 100% !important;
+                min-width: unset !important;
+                max-width: 100% !important;
+                height: calc(100vh - 45px) !important;
+                border-radius: 0 !important;
+                resize: none !important;
+            }
+            .window-header { cursor: default !important; }
+            .window-resize-handle { display: none !important; }
+
             .taskbar { height: 45px; }
             .taskbar-item { padding: 6px 10px; font-size: 0.75rem; }
+
+            /* Chat sidebar: slide-in overlay on mobile */
+            .chat-layout { position: relative; overflow: hidden; }
+            .chat-sidebar {
+                position: absolute !important;
+                top: 0; left: 0; bottom: 0;
+                z-index: 100;
+                width: 230px !important;
+                min-width: unset !important;
+                transform: translateX(-100%);
+                transition: transform 0.25s ease;
+            }
+            .chat-sidebar.open {
+                transform: translateX(0);
+                box-shadow: 4px 0 24px rgba(0,0,0,0.6);
+            }
+            .chat-main { width: 100%; }
+
+            /* Always show delete button on mobile (no hover) */
+            .conv-delete { opacity: 0.8 !important; }
+
+            /* Show mobile-only elements */
+            .mobile-sidebar-toggle { display: flex !important; }
+            .mobile-chat-header { display: flex !important; }
         }
         
         ::-webkit-scrollbar { width: 6px; }
@@ -1211,6 +1284,23 @@
             }
         }
 
+        /* ── Mobile: toggle the conversation sidebar ── */
+        function toggleChatSidebar() {
+            const sidebar = document.getElementById('chatSidebar');
+            const overlay = document.getElementById('sidebarOverlay');
+            if (!sidebar) return;
+            const isOpen = sidebar.classList.toggle('open');
+            if (overlay) overlay.style.display = isOpen ? 'block' : 'none';
+        }
+
+        function closeChatSidebarOnMobile() {
+            if (window.innerWidth > 768) return;
+            const sidebar = document.getElementById('chatSidebar');
+            const overlay = document.getElementById('sidebarOverlay');
+            if (sidebar) sidebar.classList.remove('open');
+            if (overlay) overlay.style.display = 'none';
+        }
+
         function newConversation() {
             // Save current conversation first
             saveActiveConversation();
@@ -1232,10 +1322,14 @@
             if (messagesDiv) {
                 messagesDiv.innerHTML = WELCOME_HTML;
             }
+            closeChatSidebarOnMobile();
         }
 
         function switchConversation(id) {
-            if (id === activeConversationId) return;
+            if (id === activeConversationId) {
+                closeChatSidebarOnMobile();
+                return;
+            }
             // Save current
             saveActiveConversation();
             // Load target
@@ -1250,6 +1344,7 @@
                 }
             }
             renderConversationList();
+            closeChatSidebarOnMobile();
         }
 
         function deleteConversation(id, event) {
@@ -1406,7 +1501,7 @@
 
             // Breadcrumb
             const parts = currentPath ? currentPath.split('/') : [];
-            let breadcrumb = `<span onclick="loadFiles('')" style="cursor:pointer;color:#818cf8;">Ana Dizin</span>`;
+            let breadcrumb = `<span onclick="loadFiles('')" style="cursor:pointer;color:#818cf8;">Root</span>`;
             parts.forEach((part, i) => {
                 const partPath = parts.slice(0, i + 1).join('/');
                 breadcrumb += ` <span style="color:#6b7280;">›</span> <span onclick="loadFiles('${partPath}')" style="cursor:pointer;color:#818cf8;">${part}</span>`;
@@ -1564,7 +1659,7 @@
                         </div>
                     </div>
                     <div id="fileBreadcrumb" style="font-size:0.75rem;margin-bottom:8px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.08);color:#818cf8;">
-                        <span onclick="loadFiles('')" style="cursor:pointer;">Ana Dizin</span>
+                        <span onclick="loadFiles('')" style="cursor:pointer;">Root</span>
                     </div>
                     <div class="file-grid" id="fileGrid"></div>
                 `, 650, 450);
@@ -1573,13 +1668,20 @@
             } else if (app === 'ai') {
                 createWindow('ai', '🤖 AI Assistant', `
                     <div class="chat-layout">
-                        <div class="chat-sidebar">
+                        <div class="chat-sidebar" id="chatSidebar">
                             <div class="chat-sidebar-header">
                                 <button onclick="newConversation()"><i class="fas fa-plus"></i> New Chat</button>
                             </div>
                             <div class="chat-sidebar-list" id="conversationList"></div>
                         </div>
+                        <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleChatSidebar()"></div>
                         <div class="chat-main">
+                            <div class="mobile-chat-header">
+                                <button class="mobile-sidebar-toggle" onclick="toggleChatSidebar()" title="Conversations">
+                                    <i class="fas fa-bars"></i>
+                                </button>
+                                <span style="font-size:0.8rem;color:#a5b4fc;font-weight:500;">Puterra AI</span>
+                            </div>
                             <div class="chat-container">
                                 <div class="chat-messages" id="chatMessages">
                                     <div class="chat-message assistant">
