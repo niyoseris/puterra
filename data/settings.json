@@ -13,5 +13,14 @@
   "search_engine": "ollama",
   "max_agent_iterations": 12,
   "shell_enabled": true,
-  "admin_password": "puterra2026"
+  "admin_password": "puterra2026",
+  "timeout_agent": 120,
+  "timeout_web_fetch": 30,
+  "timeout_web_search": 30,
+  "timeout_image": 30,
+  "timeout_llm_test": 60,
+  "llm_temperature": 0.7,
+  "llm_max_tokens": 32768,
+  "llm_think": true,
+  "chat_context_limit": 10
 }

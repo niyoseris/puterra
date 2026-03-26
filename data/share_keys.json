@@ -1,0 +1,14 @@
+{
+  "sk_4e0c325d72a448628e42a44dc8da6dcc": {
+    "id": "sk_4e0c325d72a448628e42a44dc8da6dcc",
+    "owner": "admin",
+    "label": "dosti",
+    "api_url": "https://ollama.com/api",
+    "model": "glm-5:cloud",
+    "api_key": "",
+    "active": true,
+    "uses": 0,
+    "created_at": 1774510239,
+    "max_uses": null
+  }
+}
