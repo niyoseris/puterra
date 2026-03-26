@@ -832,6 +832,48 @@
             display: block;
         }
 
+        /* Video Player */
+        .video-player-wrap {
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            background: #000;
+        }
+        .video-player-wrap video {
+            flex: 1;
+            width: 100%;
+            min-height: 0;
+            background: #000;
+            outline: none;
+        }
+        .video-player-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            background: rgba(15,15,25,0.95);
+            border-top: 1px solid rgba(255,255,255,0.08);
+            flex-shrink: 0;
+        }
+        .video-player-bar a {
+            color: #818cf8;
+            text-decoration: none;
+            font-size: 0.8rem;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px;
+            border-radius: 6px;
+            border: 1px solid rgba(129,140,248,0.3);
+            transition: background 0.15s;
+        }
+        .video-player-bar a:hover { background: rgba(129,140,248,0.15); }
+        .video-player-bar span {
+            color: #6b7280;
+            font-size: 0.75rem;
+            margin-left: auto;
+        }
+
         /* Settings */
         #settingsPanel select option {
             background: #1e1e28;
@@ -3678,7 +3720,7 @@ sys.stderr = io.StringIO()
                 openFolderWindow(name, displayName || name.split('/').pop());
             } else {
                 const ext = name.split('.').pop().toLowerCase();
-                const binaryExts  = ['pdf', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'zip', 'tar', 'gz', 'mp3', 'mp4', 'wav', 'ogg'];
+                const binaryExts  = ['pdf', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'zip', 'tar', 'gz', 'mp3', 'mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v', 'wav', 'ogg', 'flac', 'm4a'];
                 const viewerExts  = ['html', 'htm', 'xhtml', 'svg', 'wasm'];
                 if (binaryExts.includes(ext)) {
                     downloadOrViewFile(name, ext);
@@ -3949,27 +3991,61 @@ sys.stderr = io.StringIO()
 
         async function downloadOrViewFile(name, ext) {
             const username = currentUser?.username || 'guest';
-            const url = `${API}/files/download/${username}/${encodeURIComponent(name)}`;
+            const encodedName = name.split('/').map(encodeURIComponent).join('/');
+            const url = `${API}/files/download/${username}/${encodedName}`;
+            const shortName = name.split('/').pop();
 
             if (ext === 'pdf') {
-                // Open PDF in a new browser tab
                 window.open(url, '_blank');
             } else if (['png','jpg','jpeg','gif','bmp','webp'].includes(ext)) {
-                // Show image in a window
                 const viewerId = `viewer-${name.replace(/[^a-z0-9]/gi, '-')}`;
-                createWindow(viewerId, `🖼️ ${name}`, `
-                    <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;">
+                createWindow(viewerId, `🖼️ ${shortName}`, `
+                    <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0a0a0f;padding:10px;">
                         <img src="${url}" style="max-width:100%;max-height:calc(100% - 50px);object-fit:contain;border-radius:8px;" />
                         <div style="margin-top:10px;">
-                            <a href="${url}" download="${name}" style="color:#60a5fa;text-decoration:none;">⬇️ Download</a>
+                            <a href="${url}" download="${shortName}" style="color:#818cf8;text-decoration:none;">⬇️ Download</a>
                         </div>
                     </div>
                 `, 700, 500);
+            } else if (['mp4','webm','mov','mkv','avi','m4v','ogg'].includes(ext)) {
+                // HTML5 Video Player
+                const mimeMap = { mp4:'video/mp4', webm:'video/webm', ogg:'video/ogg', mov:'video/mp4', mkv:'video/x-matroska', avi:'video/x-msvideo', m4v:'video/mp4' };
+                const mime = mimeMap[ext] || 'video/mp4';
+                const playerId = `player-${name.replace(/[^a-z0-9]/gi, '-')}`;
+                const existing = document.getElementById(`window-${playerId}`);
+                if (existing) { existing.style.zIndex = ++windowZIndex; existing.classList.remove('minimized'); return; }
+                createWindow(playerId, `▶ ${shortName}`, `
+                    <div class="video-player-wrap">
+                        <video controls autoplay preload="metadata" style="flex:1;width:100%;min-height:0;background:#000;">
+                            <source src="${url}" type="${mime}">
+                            <p style="color:#9ca3af;text-align:center;padding:20px;">Your browser does not support this video format.</p>
+                        </video>
+                        <div class="video-player-bar">
+                            <a href="${url}" download="${shortName}"><i class="fas fa-download"></i> Download</a>
+                            <a href="${url}" target="_blank"><i class="fas fa-external-link-alt"></i> Open in tab</a>
+                            <span>${shortName}</span>
+                        </div>
+                    </div>
+                `, 800, 500);
+            } else if (['mp3','wav','flac','m4a'].includes(ext)) {
+                // Audio Player
+                const audioId = `audio-${name.replace(/[^a-z0-9]/gi, '-')}`;
+                const existing = document.getElementById(`window-${audioId}`);
+                if (existing) { existing.style.zIndex = ++windowZIndex; existing.classList.remove('minimized'); return; }
+                createWindow(audioId, `🎵 ${shortName}`, `
+                    <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:20px;background:#0a0a0f;">
+                        <i class="fas fa-music" style="font-size:3rem;color:#818cf8;"></i>
+                        <div style="color:#e5e7eb;font-size:0.9rem;">${shortName}</div>
+                        <audio controls autoplay style="width:100%;max-width:400px;">
+                            <source src="${url}">
+                        </audio>
+                        <a href="${url}" download="${shortName}" style="color:#818cf8;font-size:0.8rem;text-decoration:none;"><i class="fas fa-download"></i> Download</a>
+                    </div>
+                `, 460, 240);
             } else {
-                // Download other binary files
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = name;
+                a.download = shortName;
                 a.click();
             }
         }

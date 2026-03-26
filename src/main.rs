@@ -1643,7 +1643,14 @@ async fn download_file(path: web::Path<(String, String)>) -> impl Responder {
                 "svg" => "image/svg+xml",
                 "mp3" => "audio/mpeg",
                 "wav" => "audio/wav",
-                "mp4" => "video/mp4",
+                "ogg" => "audio/ogg",
+                "flac" => "audio/flac",
+                "m4a" => "audio/mp4",
+                "mp4" | "m4v" => "video/mp4",
+                "webm" => "video/webm",
+                "mov" => "video/quicktime",
+                "mkv" => "video/x-matroska",
+                "avi" => "video/x-msvideo",
                 "zip" => "application/zip",
                 "json" => "application/json",
                 "txt" => "text/plain; charset=utf-8",
@@ -1652,9 +1659,12 @@ async fn download_file(path: web::Path<(String, String)>) -> impl Responder {
                 "js" => "application/javascript",
                 _ => "application/octet-stream",
             };
+            let is_video = ["mp4","webm","mov","mkv","avi","m4v","ogg"].contains(&ext.as_str());
             HttpResponse::Ok()
                 .content_type(content_type)
                 .insert_header(("Content-Disposition", format!("inline; filename=\"{}\"", filename)))
+                .insert_header(("Accept-Ranges", "bytes"))
+                .insert_header(("Cache-Control", if is_video { "no-cache" } else { "public, max-age=3600" }))
                 .body(bytes)
         }
         Err(_) => HttpResponse::NotFound().body("File not found"),
