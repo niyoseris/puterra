@@ -21,11 +21,17 @@
         .desktop-bg {
             position: fixed;
             top: 0; left: 0; right: 0; bottom: 0;
-            background: 
-                radial-gradient(ellipse at top left, rgba(99, 102, 241, 0.15) 0%, transparent 50%),
-                radial-gradient(ellipse at bottom right, rgba(168, 85, 247, 0.15) 0%, transparent 50%),
-                linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+            background-image: url('https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=1920&q=80');
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
             z-index: -1;
+        }
+        .desktop-bg::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: rgba(10, 8, 30, 0.55);
         }
         
         .glass {
@@ -1832,13 +1838,23 @@
                                         </div>
                                     </div>
 
-                                    <!-- Local Ollama Configuration -->
+                                    <!-- Local Configuration -->
                                     <div style="border-bottom:1px solid rgba(255,255,255,0.08);padding-bottom:12px;">
-                                        <label style="color:#94f2d4;font-size:0.8rem;display:block;margin-bottom:8px;text-transform:uppercase;font-weight:600;">📍 Local Ollama Configuration</label>
+                                        <label style="color:#94f2d4;font-size:0.8rem;display:block;margin-bottom:8px;text-transform:uppercase;font-weight:600;">📍 Local Configuration</label>
                                         <div style="display:flex;flex-direction:column;gap:8px;">
                                             <div>
+                                                <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Provider Preset</label>
+                                                <select id="preset_local" class="input-field" onchange="applyLLMPreset('local')" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;">
+                                                    <option value="ollama-local">Ollama (Local)</option>
+                                                    <option value="lmstudio">LM Studio</option>
+                                                    <option value="llamacpp">llama.cpp</option>
+                                                    <option value="jan">Jan</option>
+                                                    <option value="custom">Custom</option>
+                                                </select>
+                                            </div>
+                                            <div>
                                                 <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">API URL</label>
-                                                <input type="text" id="set_llm_url_local" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="http://localhost:11434/api">
+                                                <input type="text" id="set_llm_url_local" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="http://localhost:11434/api/chat">
                                             </div>
                                             <div>
                                                 <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Model</label>
@@ -1854,13 +1870,28 @@
                                         </div>
                                     </div>
 
-                                    <!-- Cloud Ollama Configuration -->
+                                    <!-- Cloud Configuration -->
                                     <div>
-                                        <label style="color:#fbbf24;font-size:0.8rem;display:block;margin-bottom:8px;text-transform:uppercase;font-weight:600;">☁️ Cloud Ollama Configuration</label>
+                                        <label style="color:#fbbf24;font-size:0.8rem;display:block;margin-bottom:8px;text-transform:uppercase;font-weight:600;">☁️ Cloud Configuration</label>
                                         <div style="display:flex;flex-direction:column;gap:8px;">
                                             <div>
+                                                <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Provider Preset</label>
+                                                <select id="preset_cloud" class="input-field" onchange="applyLLMPreset('cloud')" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;">
+                                                    <option value="ollama-cloud">Ollama Cloud</option>
+                                                    <option value="openai">OpenAI</option>
+                                                    <option value="anthropic">Anthropic (Claude)</option>
+                                                    <option value="groq">Groq</option>
+                                                    <option value="together">Together AI</option>
+                                                    <option value="openrouter">OpenRouter</option>
+                                                    <option value="deepseek">DeepSeek</option>
+                                                    <option value="mistral">Mistral AI</option>
+                                                    <option value="gemini">Google Gemini</option>
+                                                    <option value="custom">Custom</option>
+                                                </select>
+                                            </div>
+                                            <div>
                                                 <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">API URL</label>
-                                                <input type="text" id="set_llm_url_cloud" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="https://ollama.com/api">
+                                                <input type="text" id="set_llm_url_cloud" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="https://ollama.com/api/chat">
                                             </div>
                                             <div>
                                                 <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Model</label>
@@ -1868,7 +1899,7 @@
                                             </div>
                                             <div>
                                                 <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">API Key</label>
-                                                <input type="password" id="set_llm_key_cloud" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="Your cloud API key">
+                                                <input type="password" id="set_llm_key_cloud" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" placeholder="Your API key">
                                             </div>
                                             <button onclick="testLLM('cloud')" style="background:rgba(251,191,36,0.2);border:1px solid rgba(251,191,36,0.3);color:#fcd34d;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:0.75rem;display:flex;align-items:center;gap:4px;align-self:flex-start;font-weight:500;">
                                                 <i class="fas fa-plug"></i> Test Cloud
@@ -2878,6 +2909,41 @@ sys.stderr = io.StringIO()
         }
 
         // ========== SETTINGS ==========
+
+        /* ── LLM Provider Presets ── */
+        const LLM_PRESETS = {
+            // Local providers
+            'ollama-local': { url: 'http://localhost:11434/api/chat',              model: 'llama3.2',                        keyRequired: false },
+            'lmstudio':     { url: 'http://localhost:1234/v1/chat/completions',    model: 'local-model',                     keyRequired: false },
+            'llamacpp':     { url: 'http://localhost:8080/v1/chat/completions',    model: 'gpt-3.5-turbo',                   keyRequired: false },
+            'jan':          { url: 'http://localhost:1337/v1/chat/completions',    model: 'llama3.2',                        keyRequired: false },
+            // Cloud providers
+            'ollama-cloud': { url: 'https://ollama.com/api/chat',                  model: 'glm-5:cloud',                     keyRequired: true  },
+            'openai':       { url: 'https://api.openai.com/v1/chat/completions',   model: 'gpt-4o',                          keyRequired: true  },
+            'anthropic':    { url: 'https://api.anthropic.com/v1/messages',        model: 'claude-opus-4-5',                 keyRequired: true  },
+            'groq':         { url: 'https://api.groq.com/openai/v1/chat/completions', model: 'llama-3.3-70b-versatile',      keyRequired: true  },
+            'together':     { url: 'https://api.together.xyz/v1/chat/completions', model: 'meta-llama/Llama-3-70b-chat-hf', keyRequired: true  },
+            'openrouter':   { url: 'https://openrouter.ai/api/v1/chat/completions',model: 'openai/gpt-4o',                   keyRequired: true  },
+            'deepseek':     { url: 'https://api.deepseek.com/v1/chat/completions', model: 'deepseek-chat',                   keyRequired: true  },
+            'mistral':      { url: 'https://api.mistral.ai/v1/chat/completions',   model: 'mistral-large-latest',            keyRequired: true  },
+            'gemini':       { url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', model: 'gemini-2.0-flash', keyRequired: true },
+            'custom':       { url: '',                                             model: '',                                keyRequired: true  },
+        };
+
+        function applyLLMPreset(side) {
+            const presetKey = document.getElementById(`preset_${side}`)?.value;
+            if (!presetKey || !LLM_PRESETS[presetKey]) return;
+            const p = LLM_PRESETS[presetKey];
+            const urlEl   = document.getElementById(`set_llm_url_${side}`);
+            const modelEl = document.getElementById(`set_llm_model_${side}`);
+            if (presetKey !== 'custom') {
+                if (urlEl)   { urlEl.value = p.url; urlEl.placeholder = p.url; }
+                if (modelEl) { modelEl.value = p.model; modelEl.placeholder = p.model; }
+            } else {
+                if (urlEl)   { urlEl.value = ''; urlEl.placeholder = 'https://your-endpoint/v1/chat/completions'; }
+                if (modelEl) { modelEl.value = ''; modelEl.placeholder = 'model-name'; }
+            }
+        }
 
         async function loadSettingsUI() {
             try {
