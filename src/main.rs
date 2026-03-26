@@ -2036,6 +2036,22 @@ fn build_tool_definitions(username: &str) -> Vec<serde_json::Value> {
         serde_json::json!({
             "type": "function",
             "function": {
+                "name": "file_edit",
+                "description": "Edit a file by replacing an exact string with a new string. Use this instead of file_write when making small changes to existing files — safer and more efficient.",
+                "parameters": {
+                    "type": "object",
+                    "required": ["name", "old_string", "new_string"],
+                    "properties": {
+                        "name": {"type": "string", "description": "File name, can include path like 'folder/file.txt'"},
+                        "old_string": {"type": "string", "description": "The exact text to find and replace. Must be unique in the file."},
+                        "new_string": {"type": "string", "description": "The text to replace it with."}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
                 "name": "shell_exec",
                 "description": "Execute a shell command on the server",
                 "parameters": {
@@ -2270,6 +2286,36 @@ async fn execute_tool(
             }
         }
 
+        "file_edit" => {
+            let name = input.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let old_string = input.get("old_string").and_then(|s| s.as_str()).unwrap_or("");
+            let new_string = input.get("new_string").and_then(|s| s.as_str()).unwrap_or("");
+            if name.is_empty() || name.contains("..") {
+                return "Error: valid file name is required".to_string();
+            }
+            if old_string.is_empty() {
+                return "Error: old_string cannot be empty".to_string();
+            }
+            let path = format!("{}/{}", get_user_dir(username), name);
+            match std::fs::read_to_string(&path) {
+                Err(e) => format!("Error reading '{}': {}", name, e),
+                Ok(content) => {
+                    let count = content.matches(old_string).count();
+                    if count == 0 {
+                        return format!("Error: old_string not found in '{}'", name);
+                    }
+                    if count > 1 {
+                        return format!("Error: old_string matches {} times in '{}' — make it more specific", count, name);
+                    }
+                    let new_content = content.replacen(old_string, new_string, 1);
+                    match std::fs::write(&path, &new_content) {
+                        Ok(_) => format!("Edited '{}': replaced {} chars with {} chars", name, old_string.len(), new_string.len()),
+                        Err(e) => format!("Error writing '{}': {}", name, e),
+                    }
+                }
+            }
+        }
+
         "file_delete" => {
             let name = input.get("name").and_then(|n| n.as_str()).unwrap_or("");
             if name.is_empty() || name.contains("..") {
@@ -2490,19 +2536,21 @@ You have access to powerful tools. You MUST use tools when you need real-time in
    Input: {{"name": "filename.txt", "content": "file content"}}
 6. **file_create** - Create an empty file or folder
    Input: {{"name": "filename.txt", "kind": "file"}}
-7. **file_delete** - Delete a file
+7. **file_edit** - Edit a file by replacing an exact string (safer than file_write for small changes)
+   Input: {{"name": "filename.txt", "old_string": "text to replace", "new_string": "replacement text"}}
+8. **file_delete** - Delete a file
    Input: {{"name": "filename.txt"}}
-8. **shell_exec** - Execute a shell command
+9. **shell_exec** - Execute a shell command
    Input: {{"command": "ls -la"}}
-9. **memory_store** - Store information for later retrieval
-   Input: {{"key": "topic", "value": "information"}}
-10. **memory_search** - Search stored memories
+10. **memory_store** - Store information for later retrieval
+    Input: {{"key": "topic", "value": "information"}}
+11. **memory_search** - Search stored memories
     Input: {{"query": "search terms"}}
-11. **run_python** - Execute Python code
+12. **run_python** - Execute Python code
     Input: {{"code": "print('hello')"}}
-12. **run_javascript** - Execute JavaScript/Node.js code
+13. **run_javascript** - Execute JavaScript/Node.js code
     Input: {{"code": "console.log('hello')"}}
-13. **create_pdf** - Create a PDF document and save to user's storage
+14. **create_pdf** - Create a PDF document and save to user's storage
     Input: {{"filename": "report.pdf", "title": "My Report", "content": "Heading\n\nBody text here..."}}
 
 ## How to respond
@@ -2985,6 +3033,7 @@ async fn tools_list() -> impl Responder {
             {"name": "file_list", "description": "List files"},
             {"name": "file_read", "description": "Read file content"},
             {"name": "file_write", "description": "Write file content"},
+            {"name": "file_edit", "description": "Edit file by replacing exact string"},
             {"name": "file_create", "description": "Create file or folder"},
             {"name": "file_delete", "description": "Delete file or folder"},
             {"name": "create_pdf", "description": "Create PDF documents (built-in Rust, no external deps)"},
