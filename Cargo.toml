@@ -22,3 +22,5 @@ image = "0.24"
 urlencoding = "2.1"
 resvg = "0.44"
 tokio-stream = "0.1"
+zip = { version = "2", features = ["deflate"] }
+cron = "0.12"

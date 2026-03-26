@@ -11,7 +11,7 @@ use sha2::{Sha256, Digest};
 use uuid::Uuid;
 use std::process::Command;
 use printpdf::*;
-use std::io::BufWriter;
+use std::io::{BufWriter, Read, Write, Seek};
 use regex::Regex;
 // Import from the external image crate (same version as printpdf uses)
 use ::image::DynamicImage;
@@ -2232,6 +2232,75 @@ fn build_tool_definitions(username: &str) -> Vec<serde_json::Value> {
         serde_json::json!({
             "type": "function",
             "function": {
+                "name": "zip_create",
+                "description": "Create a ZIP archive from a file or folder in the user's storage",
+                "parameters": {
+                    "type": "object",
+                    "required": ["source"],
+                    "properties": {
+                        "source": {"type": "string", "description": "File or folder name to zip (e.g. 'report.pdf' or 'travel/')"},
+                        "output": {"type": "string", "description": "Output zip filename (optional, defaults to source.zip)"}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "unzip",
+                "description": "Extract a ZIP archive in the user's storage",
+                "parameters": {
+                    "type": "object",
+                    "required": ["archive"],
+                    "properties": {
+                        "archive": {"type": "string", "description": "Name of the .zip file to extract"},
+                        "destination": {"type": "string", "description": "Destination folder name (optional, defaults to archive name without .zip)"}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "cron_create",
+                "description": "Schedule a recurring task using a cron expression. The task will run a shell command on schedule.",
+                "parameters": {
+                    "type": "object",
+                    "required": ["name", "schedule", "command"],
+                    "properties": {
+                        "name": {"type": "string", "description": "Human-readable name for this job"},
+                        "schedule": {"type": "string", "description": "5-field cron expression, e.g. '0 9 * * *' = daily at 9am, '*/30 * * * *' = every 30 min"},
+                        "command": {"type": "string", "description": "Shell command to run on schedule"},
+                        "description": {"type": "string", "description": "What this job does (optional)"}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "cron_list",
+                "description": "List all scheduled cron jobs",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "cron_delete",
+                "description": "Delete a scheduled cron job by id or name",
+                "parameters": {
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": {
+                        "id": {"type": "string", "description": "Job id (first 8 chars) or exact name"}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
                 "name": "memory_store",
                 "description": "Store information in persistent memory for later retrieval",
                 "parameters": {
@@ -2689,6 +2758,213 @@ async fn execute_tool(
             }
         }
 
+        // ── zip_create ──────────────────────────────────────────────────────
+        "zip_create" => {
+            let source = input.get("source").and_then(|s| s.as_str()).unwrap_or("");
+            let output = input.get("output").and_then(|s| s.as_str()).unwrap_or("");
+            if source.is_empty() { return "Error: source is required".to_string(); }
+            if source.contains("..") || output.contains("..") { return "Error: path traversal not allowed".to_string(); }
+            let user_dir = get_user_dir(username);
+            let src_path = std::path::Path::new(&user_dir).join(source);
+            let zip_name = if output.is_empty() {
+                format!("{}.zip", source.trim_end_matches('/'))
+            } else {
+                output.to_string()
+            };
+            let zip_path = std::path::Path::new(&user_dir).join(&zip_name);
+
+            let zip_file = match std::fs::File::create(&zip_path) {
+                Ok(f) => f,
+                Err(e) => return format!("Error creating zip file: {}", e),
+            };
+            let mut zip = zip::ZipWriter::new(zip_file);
+            let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+
+            let mut file_count = 0u32;
+            if src_path.is_file() {
+                let fname = src_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if let Ok(mut f) = std::fs::File::open(&src_path) {
+                    let mut buf = Vec::new();
+                    if f.read_to_end(&mut buf).is_ok() {
+                        if zip.start_file(&fname, options).is_ok() {
+                            zip.write_all(&buf).ok();
+                            file_count += 1;
+                        }
+                    }
+                }
+            } else if src_path.is_dir() {
+                fn add_dir_to_zip<W: Write + Seek>(
+                    zip: &mut zip::ZipWriter<W>,
+                    dir: &std::path::Path,
+                    base: &std::path::Path,
+                    options: zip::write::SimpleFileOptions,
+                    count: &mut u32,
+                ) {
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            let rel = path.strip_prefix(base).unwrap_or(&path);
+                            if path.is_file() {
+                                if let Ok(mut f) = std::fs::File::open(&path) {
+                                    let mut buf = Vec::new();
+                                    if f.read_to_end(&mut buf).is_ok() {
+                                        let name = rel.to_string_lossy().to_string();
+                                        if zip.start_file(&name, options).is_ok() {
+                                            zip.write_all(&buf).ok();
+                                            *count += 1;
+                                        }
+                                    }
+                                }
+                            } else if path.is_dir() {
+                                let name = format!("{}/", rel.to_string_lossy());
+                                zip.add_directory(&name, options).ok();
+                                add_dir_to_zip(zip, &path, base, options, count);
+                            }
+                        }
+                    }
+                }
+                add_dir_to_zip(&mut zip, &src_path, &src_path, options, &mut file_count);
+            } else {
+                return format!("Error: '{}' not found", source);
+            }
+
+            match zip.finish() {
+                Ok(_) => format!("Created '{}' with {} file(s)", zip_name, file_count),
+                Err(e) => format!("Error finalizing zip: {}", e),
+            }
+        }
+
+        // ── unzip ────────────────────────────────────────────────────────────
+        "unzip" => {
+            let archive = input.get("archive").and_then(|s| s.as_str()).unwrap_or("");
+            let dest = input.get("destination").and_then(|s| s.as_str()).unwrap_or("");
+            if archive.is_empty() { return "Error: archive is required".to_string(); }
+            if archive.contains("..") || dest.contains("..") { return "Error: path traversal not allowed".to_string(); }
+            let user_dir = get_user_dir(username);
+            let archive_path = std::path::Path::new(&user_dir).join(archive);
+            let dest_dir = if dest.is_empty() {
+                std::path::Path::new(&user_dir).join(archive.trim_end_matches(".zip"))
+            } else {
+                std::path::Path::new(&user_dir).join(dest)
+            };
+
+            let zip_file = match std::fs::File::open(&archive_path) {
+                Ok(f) => f,
+                Err(e) => return format!("Error opening archive: {}", e),
+            };
+            let mut archive = match zip::ZipArchive::new(zip_file) {
+                Ok(a) => a,
+                Err(e) => return format!("Error reading zip: {}", e),
+            };
+
+            std::fs::create_dir_all(&dest_dir).ok();
+            let mut extracted = 0u32;
+            for i in 0..archive.len() {
+                let mut file = match archive.by_index(i) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                let out_path = dest_dir.join(file.name());
+                if file.name().ends_with('/') {
+                    std::fs::create_dir_all(&out_path).ok();
+                } else {
+                    if let Some(parent) = out_path.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    if let Ok(mut out) = std::fs::File::create(&out_path) {
+                        let mut buf = Vec::new();
+                        if file.read_to_end(&mut buf).is_ok() {
+                            out.write_all(&buf).ok();
+                            extracted += 1;
+                        }
+                    }
+                }
+            }
+            format!("Extracted {} file(s) to '{}'", extracted, dest_dir.file_name().unwrap_or_default().to_string_lossy())
+        }
+
+        // ── cron_create ──────────────────────────────────────────────────────
+        "cron_create" => {
+            let name    = input.get("name").and_then(|s| s.as_str()).unwrap_or("").trim().to_string();
+            let schedule = input.get("schedule").and_then(|s| s.as_str()).unwrap_or("").trim().to_string();
+            let command = input.get("command").and_then(|s| s.as_str()).unwrap_or("").trim().to_string();
+            let description = input.get("description").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            if name.is_empty() || schedule.is_empty() || command.is_empty() {
+                return "Error: name, schedule, and command are required".to_string();
+            }
+            // Validate cron expression (5 fields)
+            let parts: Vec<&str> = schedule.split_whitespace().collect();
+            if parts.len() != 5 {
+                return "Error: schedule must be a 5-field cron expression (e.g. '0 9 * * *' = daily at 9am)".to_string();
+            }
+            let cron_dir = format!("data/cron/{}", username);
+            std::fs::create_dir_all(&cron_dir).ok();
+            let jobs_path = format!("{}/jobs.json", cron_dir);
+            let mut jobs: Vec<serde_json::Value> = std::fs::read_to_string(&jobs_path)
+                .ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            let id = Uuid::new_v4().to_string();
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            jobs.push(serde_json::json!({
+                "id": id, "name": name, "schedule": schedule,
+                "command": command, "description": description,
+                "created_at": now, "last_run": null, "enabled": true
+            }));
+            match std::fs::write(&jobs_path, serde_json::to_string_pretty(&jobs).unwrap_or_default()) {
+                Ok(_) => format!("Cron job '{}' created (id: {}). Schedule: {} — runs: {}", name, &id[..8], schedule, command),
+                Err(e) => format!("Error saving cron job: {}", e),
+            }
+        }
+
+        // ── cron_list ────────────────────────────────────────────────────────
+        "cron_list" => {
+            let jobs_path = format!("data/cron/{}/jobs.json", username);
+            let jobs: Vec<serde_json::Value> = std::fs::read_to_string(&jobs_path)
+                .ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            if jobs.is_empty() {
+                return "No cron jobs scheduled.".to_string();
+            }
+            let mut out = format!("{} scheduled job(s):\n", jobs.len());
+            for j in &jobs {
+                let enabled = if j.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true) { "✅" } else { "⏸️" };
+                let last = j.get("last_run").and_then(|l| l.as_u64()).map(|t| {
+                    chrono::DateTime::<chrono::Utc>::from(std::time::UNIX_EPOCH + std::time::Duration::from_secs(t))
+                        .format("%Y-%m-%d %H:%M UTC").to_string()
+                }).unwrap_or("never".to_string());
+                out.push_str(&format!(
+                    "{} [{}] {} | schedule: {} | last: {} | cmd: {}\n",
+                    enabled,
+                    &j.get("id").and_then(|i| i.as_str()).unwrap_or("?")[..8],
+                    j.get("name").and_then(|n| n.as_str()).unwrap_or("?"),
+                    j.get("schedule").and_then(|s| s.as_str()).unwrap_or("?"),
+                    last,
+                    j.get("command").and_then(|c| c.as_str()).unwrap_or("?"),
+                ));
+            }
+            out.trim_end().to_string()
+        }
+
+        // ── cron_delete ──────────────────────────────────────────────────────
+        "cron_delete" => {
+            let id_or_name = input.get("id").and_then(|s| s.as_str())
+                .or_else(|| input.get("name").and_then(|s| s.as_str()))
+                .unwrap_or("");
+            if id_or_name.is_empty() { return "Error: id or name is required".to_string(); }
+            let jobs_path = format!("data/cron/{}/jobs.json", username);
+            let mut jobs: Vec<serde_json::Value> = std::fs::read_to_string(&jobs_path)
+                .ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            let before = jobs.len();
+            jobs.retain(|j| {
+                let jid = j.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                let jname = j.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                !jid.starts_with(id_or_name) && jname != id_or_name
+            });
+            let removed = before - jobs.len();
+            if removed == 0 { return format!("No job found matching '{}'", id_or_name); }
+            std::fs::write(&jobs_path, serde_json::to_string_pretty(&jobs).unwrap_or_default()).ok();
+            format!("Deleted {} cron job(s) matching '{}'", removed, id_or_name)
+        }
+
         _ => format!("Unknown tool: '{}'", tool),
     }
 }
@@ -2731,6 +3007,16 @@ You have access to powerful tools. You MUST use tools when you need real-time in
     Input: {{"code": "console.log('hello')"}}
 14. **create_pdf** - Create a PDF document and save to user's storage
     Input: {{"filename": "report.pdf", "title": "My Report", "content": "Heading\n\nBody text here..."}}
+15. **zip_create** - Create a ZIP archive from a file or folder
+    Input: {{"source": "travel/", "output": "travel_backup.zip"}}
+16. **unzip** - Extract a ZIP archive
+    Input: {{"archive": "files.zip", "destination": "extracted/"}}
+17. **cron_create** - Schedule a recurring shell command
+    Input: {{"name": "daily backup", "schedule": "0 9 * * *", "command": "echo backup done >> backup.log"}}
+18. **cron_list** - List all scheduled jobs
+    Input: {{}}
+19. **cron_delete** - Delete a scheduled job
+    Input: {{"id": "abc12345"}}
 
 ## How to respond
 
@@ -3236,6 +3522,11 @@ async fn tools_list() -> impl Responder {
             {"name": "file_create", "description": "Create file or folder"},
             {"name": "file_delete", "description": "Delete file or folder"},
             {"name": "create_pdf", "description": "Create PDF documents (built-in Rust, no external deps)"},
+            {"name": "zip_create", "description": "Create ZIP archive from file or folder"},
+            {"name": "unzip", "description": "Extract ZIP archive"},
+            {"name": "cron_create", "description": "Schedule a recurring shell command"},
+            {"name": "cron_list", "description": "List scheduled cron jobs"},
+            {"name": "cron_delete", "description": "Delete a scheduled cron job"},
             {"name": "agent", "description": "Agentic AI with native tool calling"}
         ]
     }))
