@@ -3579,17 +3579,24 @@ sys.stderr = io.StringIO()
                 const folderFiles = await loadFolderFiles(path);
                 const rootName = rootPath.split('/').pop();
 
-                const parts = path ? path.split('/') : [];
+                // Breadcrumb: only show when navigated into a subfolder
                 const rootParts = rootPath.split('/');
-                let bread = `<span onclick="renderFolderInWindow('${wid}','${rootPath}','${rootPath}')" style="cursor:pointer;color:#818cf8;">${rootName}</span>`;
-                const subParts = parts.slice(rootParts.length);
-                subParts.forEach((part, i) => {
-                    const p = [...rootParts, ...subParts.slice(0, i + 1)].join('/');
-                    bread += ` <span style="color:#6b7280;">›</span> <span onclick="renderFolderInWindow('${wid}','${p}','${rootPath}')" style="cursor:pointer;color:#818cf8;">${part}</span>`;
-                });
-
+                const subParts = path ? path.split('/').slice(rootParts.length) : [];
                 const breadEl = document.getElementById(breadId);
-                if (breadEl) breadEl.innerHTML = bread;
+                if (breadEl) {
+                    if (subParts.length === 0) {
+                        breadEl.style.display = 'none';
+                        breadEl.innerHTML = '';
+                    } else {
+                        breadEl.style.display = 'block';
+                        let bread = `<span onclick="renderFolderInWindow('${wid}','${rootPath}','${rootPath}')" style="cursor:pointer;color:#818cf8;">${rootName}</span>`;
+                        subParts.forEach((part, i) => {
+                            const p = [...rootParts, ...subParts.slice(0, i + 1)].join('/');
+                            bread += ` <span style="color:#6b7280;">›</span> <span onclick="renderFolderInWindow('${wid}','${p}','${rootPath}')" style="cursor:pointer;color:#818cf8;">${part}</span>`;
+                        });
+                        breadEl.innerHTML = bread;
+                    }
+                }
 
                 const grid = document.getElementById(gridId);
                 if (!grid) return;
@@ -3608,7 +3615,9 @@ sys.stderr = io.StringIO()
                     const fullPath = path ? `${path}/${f.name}` : f.name;
                     const icon = f.is_dir ? 'fa-folder text-yellow-400' : getFileIcon(f.name);
                     const dblclick = f.is_dir ? `renderFolderInWindow('${wid}','${fullPath}','${rootPath}')` : `openFile('${fullPath}', false, '${f.name}')`;
-                    return `<div class="file-item folder-win-item" ondblclick="${dblclick}"
+                    return `<div class="file-item folder-win-item"
+                         onclick="selectFolderItem(this)"
+                         ondblclick="${dblclick}"
                          oncontextmenu="event.stopPropagation();event.preventDefault();setFolderContext('${fullPath}','${f.name}',${f.is_dir},'${wid}','${path}','${rootPath}',event)"
                          style="position:relative;">
                         <i class="fas ${icon}"></i>
@@ -3623,13 +3632,20 @@ sys.stderr = io.StringIO()
             };
 
             createWindow(winId, `📁 ${folderName}`, `
-                <div id="fbread-${winId}" style="font-size:0.75rem;margin-bottom:6px;color:#818cf8;min-height:0;"></div>
+                <div id="fbread-${winId}" style="display:none;font-size:0.75rem;margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,0.08);color:#818cf8;"></div>
                 <div class="file-grid" id="fgrid-${winId}">
                     <div style="grid-column:1/-1;text-align:center;color:#6b7280;padding:20px;">Loading...</div>
                 </div>
             `, 550, 400);
 
             await window.renderFolderInWindow(winId, folderPath, folderPath);
+        }
+
+        function selectFolderItem(el) {
+            // Deselect all siblings in the same grid, then select clicked item
+            const grid = el.closest('.file-grid');
+            if (grid) grid.querySelectorAll('.file-item').forEach(i => i.classList.remove('selected'));
+            el.classList.add('selected');
         }
 
         async function deleteFolderItem(fullPath, wid, currentPath, rootPath) {
