@@ -1978,7 +1978,38 @@ Tool Reuse Strategy:
 - When you write code to accomplish a repeatable task, save it as a custom tool using file_write to the tools/ directory as a JSON file.
 - Before writing code from scratch, check existing custom tools with file_list to see if a relevant tool already exists.
 - Tools should be GENERAL PURPOSE and REUSABLE, not single-use scripts. Example: write a general "web_scraper" tool with URL+selector params, not a "scrape_kktc_cinemas" tool.
-- When an existing tool almost fits, read it with file_read and improve it rather than creating a new one."#,
+- When an existing tool almost fits, read it with file_read and improve it rather than creating a new one.
+
+## Task Persistence (REQUIRED for multi-step tasks)
+
+For ANY task with 3+ steps, or that involves research, writing, data collection, or file creation:
+
+**At the START of the task:**
+1. Create a task folder: `tasks/YYYY-MM-DD-short-task-slug/`  (e.g. `tasks/2024-01-15-istanbul-guide/`)
+2. Write `tasks/FOLDER/plan.md` containing:
+   - ## Goal: what the user wants
+   - ## Steps: numbered list of every step needed
+   - ## Status: 🔄 In Progress
+
+**After EACH completed step:**
+- Update `tasks/FOLDER/progress.md` with:
+  - ✅ Completed steps (with brief findings)
+  - 🔄 Current step
+  - ⏳ Remaining steps
+- Save any important findings, URLs, data to `tasks/FOLDER/findings.md`
+- Save any created files (images, docs, data) into `tasks/FOLDER/`
+
+**If you encounter an ERROR or need to RESUME:**
+1. Run `file_list` and look for existing task folders under `tasks/`
+2. Read `progress.md` to see where you left off
+3. Read `findings.md` to recover previous research
+4. Continue from the last incomplete step — NEVER restart from scratch
+
+**At task COMPLETION:**
+- Update `plan.md` Status to: ✅ Complete
+- Write a short summary at the bottom of `progress.md`
+
+This ensures long tasks survive errors, restarts, and context limits."#,
         now.format("%Y-%m-%d %H:%M UTC"),
         username
     )
@@ -2678,7 +2709,24 @@ Final Answer: [your complete answer with markdown formatting]
 - Respond in the SAME LANGUAGE as the user message
 - NEVER say you do not have access to real-time data - USE the tools!
 - To create PDF files, ALWAYS use the create_pdf tool. Do NOT use Python for PDF creation.
-- After receiving an Observation, you MUST either use another tool OR give a Final Answer"#,
+- After receiving an Observation, you MUST either use another tool OR give a Final Answer
+
+## Task Persistence (REQUIRED for multi-step tasks)
+
+For ANY task with 3+ steps (research, writing, data collection, file creation):
+
+**START of task:** Create `tasks/YYYY-MM-DD-slug/plan.md` with goal + step list.
+
+**After EACH step:** Update `tasks/FOLDER/progress.md`:
+- ✅ done steps (with findings)
+- 🔄 current step
+- ⏳ remaining steps
+
+Save findings to `tasks/FOLDER/findings.md`, created files to `tasks/FOLDER/`.
+
+**On ERROR or RESUME:** Read `tasks/FOLDER/progress.md` → continue from last incomplete step. NEVER restart from scratch.
+
+**On COMPLETION:** Mark plan.md as ✅ Complete."#,
         now.format("%Y-%m-%d %H:%M UTC"), username)
 }
 
