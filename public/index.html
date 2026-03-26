@@ -853,6 +853,7 @@
             grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
             gap: 10px;
             padding: 10px;
+            align-items: start;
         }
         
         .file-item {
@@ -1546,7 +1547,7 @@
                 html += files.map((file, i) => {
                     const filePath = currentPath ? `${currentPath}/${file.name}` : file.name;
                     const dnd = file.is_dir
-                        ? `ondragover="onItemDragOver(event,true)" ondragleave="onItemDragLeave(event)" ondrop="onItemDrop(event,'${filePath}',null,null)"`
+                        ? `ondragover="onItemDragOver(event,true)" ondragleave="onItemDragLeave(event)" ondrop="onItemDrop(event,'${filePath}',null,null,null)"`
                         : '';
                     return `<div class="file-item ${selectedItems.includes(i) ? 'selected' : ''}"
                          draggable="true"
@@ -3639,7 +3640,7 @@ sys.stderr = io.StringIO()
                     const icon = f.is_dir ? 'fa-folder text-yellow-400' : getFileIcon(f.name);
                     const dblclick = f.is_dir ? `renderFolderInWindow('${wid}','${fullPath}','${rootPath}')` : `openFile('${fullPath}', false, '${f.name}')`;
                     const dnd = f.is_dir
-                        ? `ondragover="onItemDragOver(event,true)" ondragleave="onItemDragLeave(event)" ondrop="onItemDrop(event,'${fullPath}','${wid}','${rootPath}')"`
+                        ? `ondragover="onItemDragOver(event,true)" ondragleave="onItemDragLeave(event)" ondrop="onItemDrop(event,'${fullPath}','${wid}','${path}','${rootPath}')"`
                         : '';
                     return `<div class="file-item folder-win-item"
                          draggable="true"
@@ -3704,7 +3705,7 @@ sys.stderr = io.StringIO()
             event.currentTarget.classList.remove('drag-over');
         }
 
-        async function onItemDrop(event, destFolderPath, wid, rootPath) {
+        async function onItemDrop(event, destFolderPath, wid, curPath, rootPath) {
             event.preventDefault();
             event.currentTarget.classList.remove('drag-over');
             if (!_draggedFile) return;
@@ -3725,9 +3726,9 @@ sys.stderr = io.StringIO()
                 const data = await res.json();
                 if (data.success) {
                     showToast(`Moved to ${destFolderPath.split('/').pop()}`, 'success');
-                    // Refresh both main grid and any folder windows
                     loadFiles(currentPath);
-                    if (wid && rootPath) window.renderFolderInWindow(wid, destFolderPath, rootPath);
+                    // Refresh current folder (where file came from), not destination
+                    if (wid && rootPath) window.renderFolderInWindow(wid, curPath || rootPath, rootPath);
                 } else {
                     showToast(data.error || 'Move failed', 'error');
                 }
