@@ -13,11 +13,11 @@
         
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
             min-height: 100vh;
             overflow: hidden;
+            background-color: #0f0c29;
         }
-        
+
         .desktop-bg {
             position: fixed;
             top: 0; left: 0; right: 0; bottom: 0;
@@ -25,13 +25,13 @@
             background-size: cover;
             background-position: center;
             background-repeat: no-repeat;
-            z-index: -1;
+            z-index: 0;
         }
         .desktop-bg::after {
             content: '';
             position: absolute;
             inset: 0;
-            background: rgba(10, 8, 30, 0.55);
+            background: rgba(10, 8, 30, 0.52);
         }
         
         .glass {
@@ -994,7 +994,7 @@
     <div id="desktopScreen" class="hidden min-h-screen">
         <div class="desktop-bg"></div>
         
-        <div id="desktopArea" class="p-6 pb-16" style="height: calc(100vh - 50px); overflow-y: auto;">
+        <div id="desktopArea" class="p-6 pb-16" style="height: calc(100vh - 50px); overflow-y: auto; position: relative; z-index: 1;">
             <div id="desktopIcons" class="flex flex-wrap gap-3"></div>
         </div>
         
