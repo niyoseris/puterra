@@ -1560,10 +1560,11 @@ async fn list_files(path: web::Path<String>, query: web::Query<std::collections:
 async fn create_item(body: web::Json<CreateRequest>) -> impl Responder {
     let user_dir = get_user_dir(&body.username);
     std::fs::create_dir_all(&user_dir).ok();
-    if body.name.contains("..") || body.name.contains('/') {
+    if body.name.contains("..") {
         return HttpResponse::BadRequest().json(serde_json::json!({ "success": false, "error": "Invalid name" }));
     }
     let path = format!("{}/{}", user_dir, body.name);
+    if let Some(parent) = std::path::Path::new(&path).parent() { std::fs::create_dir_all(parent).ok(); }
     let result = if body.r#type == "folder" { std::fs::create_dir(&path) } else { std::fs::write(&path, "").map(|_| ()) };
     match result {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "success": true })),
@@ -1597,7 +1598,7 @@ async fn rename_item(body: web::Json<RenameRequest>) -> impl Responder {
 
 #[post("/api/files/read")]
 async fn read_file(body: web::Json<ReadRequest>) -> impl Responder {
-    if body.name.contains("..") || body.name.contains('/') {
+    if body.name.contains("..") {
         return HttpResponse::BadRequest().json(serde_json::json!({ "success": false, "error": "Invalid name" }));
     }
     let path = format!("{}/{}", get_user_dir(&body.username), body.name);
@@ -1609,12 +1610,13 @@ async fn read_file(body: web::Json<ReadRequest>) -> impl Responder {
 
 #[post("/api/files/write")]
 async fn write_file(body: web::Json<WriteRequest>) -> impl Responder {
-    if body.name.contains("..") || body.name.contains('/') {
+    if body.name.contains("..") {
         return HttpResponse::BadRequest().json(serde_json::json!({ "success": false, "error": "Invalid name" }));
     }
     let user_dir = get_user_dir(&body.username);
-    std::fs::create_dir_all(&user_dir).ok();
-    match std::fs::write(format!("{}/{}", user_dir, body.name), &body.content) {
+    let full_path = format!("{}/{}", user_dir, body.name);
+    if let Some(parent) = std::path::Path::new(&full_path).parent() { std::fs::create_dir_all(parent).ok(); }
+    match std::fs::write(&full_path, &body.content) {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "success": true })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "success": false, "error": e.to_string() }))
     }
