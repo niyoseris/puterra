@@ -4061,6 +4061,116 @@ async fn health() -> impl Responder {
 // MAIN
 // ============================================================
 
+// ============================================================
+// CRON RUNNER
+// ============================================================
+
+/// Returns true if the 5-field cron expression fires at the current UTC minute.
+fn matches_schedule(schedule_str: &str) -> bool {
+    use std::str::FromStr;
+    use chrono::Timelike;
+    // cron crate uses 6 fields (sec min hour dom month dow); prepend "0 "
+    let expr = format!("0 {}", schedule_str);
+    match cron::Schedule::from_str(&expr) {
+        Err(e) => { eprintln!("[CRON] Invalid expression '{}': {}", schedule_str, e); false }
+        Ok(schedule) => {
+            let now: chrono::DateTime<chrono::Utc> = chrono::Utc::now();
+            // Truncate to current minute
+            let current_minute = match now.with_second(0).and_then(|t| t.with_nanosecond(0)) {
+                Some(t) => t,
+                None => return false,
+            };
+            // One second before current minute → next occurrence should be current_minute
+            let just_before = current_minute - chrono::Duration::seconds(1);
+            match schedule.after(&just_before).next() {
+                Some(next) => next == current_minute,
+                None => false,
+            }
+        }
+    }
+}
+
+/// Spawn a background task that runs cron jobs every minute.
+fn start_cron_runner() {
+    tokio::spawn(async move {
+        loop {
+            // Sleep until start of next minute
+            let now: chrono::DateTime<chrono::Utc> = chrono::Utc::now();
+            use chrono::Timelike;
+            let secs_to_next = 60u64.saturating_sub(now.second() as u64);
+            tokio::time::sleep(std::time::Duration::from_secs(secs_to_next.max(1))).await;
+
+            let now_ts = chrono::Utc::now().timestamp() as u64;
+
+            // Walk data/cron/<username>/jobs.json for all users
+            let cron_base = std::path::Path::new("data/cron");
+            if !cron_base.exists() { continue; }
+            let entries = match std::fs::read_dir(cron_base) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            for user_entry in entries.flatten() {
+                let username = user_entry.file_name().to_string_lossy().to_string();
+                let jobs_path = format!("data/cron/{}/jobs.json", username);
+                let mut jobs: Vec<serde_json::Value> = std::fs::read_to_string(&jobs_path)
+                    .ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+                if jobs.is_empty() { continue; }
+
+                let user_dir = get_user_dir(&username);
+                std::fs::create_dir_all(&user_dir).ok();
+
+                let mut changed = false;
+                for job in jobs.iter_mut() {
+                    let enabled = job.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true);
+                    if !enabled { continue; }
+
+                    // Avoid double-firing within the same minute
+                    if let Some(last) = job.get("last_run").and_then(|l| l.as_u64()) {
+                        if now_ts.saturating_sub(last) < 55 { continue; }
+                    }
+
+                    let schedule_str = job.get("schedule").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    if !matches_schedule(&schedule_str) { continue; }
+
+                    let command = job.get("command").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                    let job_name = job.get("name").and_then(|n| n.as_str()).unwrap_or("?").to_string();
+                    let dir = user_dir.clone();
+
+                    eprintln!("[CRON] Firing '{}' for user {} | cmd: {}", job_name, username, command);
+
+                    // Run in a blocking thread so we don't block the async runtime
+                    let output = tokio::task::spawn_blocking(move || {
+                        std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(&command)
+                            .current_dir(&dir)
+                            .output()
+                    }).await;
+
+                    match output {
+                        Ok(Ok(out)) => {
+                            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                            if !stdout.is_empty() { eprintln!("[CRON] stdout: {}", stdout.trim()); }
+                            if !stderr.is_empty() { eprintln!("[CRON] stderr: {}", stderr.trim()); }
+                        }
+                        Err(e) => eprintln!("[CRON] spawn error: {}", e),
+                        Ok(Err(e)) => eprintln!("[CRON] exec error: {}", e),
+                    }
+
+                    job["last_run"] = serde_json::json!(now_ts);
+                    changed = true;
+                }
+
+                if changed {
+                    std::fs::write(&jobs_path, serde_json::to_string_pretty(&jobs).unwrap_or_default()).ok();
+                }
+            }
+        }
+    });
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
@@ -4084,11 +4194,15 @@ async fn main() -> std::io::Result<()> {
 
     std::fs::create_dir_all("data/users/guest").ok();
 
+    // Start cron job runner (checks every minute)
+    start_cron_runner();
+
     println!("Puterra Cloud OS v1.1.0");
     println!("LLM: {} [{}] (model: {})", settings.llm_provider, settings.llm_api_url, settings.llm_model);
     println!("Search: {} (integrated)", settings.search_engine);
     println!("Agent: Native tool calling, max {} iterations", settings.max_agent_iterations);
     println!("Shell: {}", if settings.shell_enabled { "enabled" } else { "disabled" });
+    println!("Cron: background runner active");
     println!("http://0.0.0.0:3707");
 
     HttpServer::new(move || {
