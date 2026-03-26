@@ -709,6 +709,87 @@
             justify-content: space-between;
         }
 
+        /* Desktop Widgets */
+        #widgetLayer {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: calc(100vh - 50px);
+            pointer-events: none;
+            z-index: 5;
+        }
+        .desktop-widget {
+            position: absolute;
+            pointer-events: all;
+            display: flex;
+            flex-direction: column;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.1);
+            background: rgba(15,12,40,0.6);
+            backdrop-filter: blur(16px);
+            min-width: 160px;
+            min-height: 100px;
+        }
+        .desktop-widget.widget-focused {
+            box-shadow: 0 8px 32px rgba(0,0,0,0.6), 0 0 0 1px rgba(99,102,241,0.5);
+        }
+        .widget-handle {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 8px;
+            background: rgba(0,0,0,0.3);
+            cursor: grab;
+            user-select: none;
+            flex-shrink: 0;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+        .widget-handle:active { cursor: grabbing; }
+        .widget-handle .wh-title {
+            flex: 1;
+            font-size: 0.7rem;
+            color: #9ca3af;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .widget-handle .wh-btn {
+            background: none;
+            border: none;
+            color: #6b7280;
+            cursor: pointer;
+            font-size: 0.75rem;
+            padding: 2px 5px;
+            border-radius: 4px;
+            line-height: 1;
+            transition: color 0.15s, background 0.15s;
+        }
+        .widget-handle .wh-btn:hover { color: #e5e7eb; background: rgba(255,255,255,0.1); }
+        .widget-handle .wh-btn.close:hover { color: #ef4444; }
+        .widget-iframe {
+            flex: 1;
+            width: 100%;
+            border: none;
+            background: transparent;
+            display: block;
+        }
+        .widget-resize {
+            position: absolute;
+            right: 0; bottom: 0;
+            width: 16px; height: 16px;
+            cursor: nwse-resize;
+            opacity: 0.4;
+        }
+        .widget-resize::after {
+            content: '';
+            position: absolute;
+            right: 3px; bottom: 3px;
+            width: 8px; height: 8px;
+            border-right: 2px solid #6b7280;
+            border-bottom: 2px solid #6b7280;
+            border-radius: 1px;
+        }
+
         /* HTML Viewer */
         .html-viewer-toolbar {
             display: flex;
@@ -1052,7 +1133,8 @@
     <!-- Desktop -->
     <div id="desktopScreen" class="hidden min-h-screen">
         <div class="desktop-bg"></div>
-        
+        <div id="widgetLayer"></div>
+
         <div id="desktopArea" class="p-6 pb-16" style="height: calc(100vh - 50px); overflow-y: auto; position: relative; z-index: 1;">
             <div id="desktopIcons" class="flex flex-wrap gap-3"></div>
         </div>
@@ -1116,6 +1198,11 @@
                 <span>Delete</span>
             </div>
             <div class="context-menu-divider" style="height:1px;background:rgba(255,255,255,0.1);margin:4px 0;"></div>
+            <div class="context-menu-item" onclick="pinAsWidget()" id="pinWidgetMenuItem" style="display:none;">
+                <i class="fas fa-thumbtack"></i>
+                <span>Pin as Widget</span>
+            </div>
+            <div class="context-menu-divider" id="pinWidgetDivider" style="height:1px;background:rgba(255,255,255,0.1);margin:4px 0;display:none;"></div>
             <div class="context-menu-item" onclick="refresh()">
                 <i class="fas fa-sync"></i>
                 <span>Refresh</span>
@@ -1274,6 +1361,8 @@
             document.getElementById('desktopScreen').classList.remove('hidden');
             document.getElementById('userDisplay').textContent = currentUser?.username || 'Guest';
             loadFiles();
+            // Restore pinned widgets after a short delay (token must be ready)
+            setTimeout(loadSavedWidgets, 300);
         }
         
         // Check session on load - require login
@@ -3863,6 +3952,173 @@ sys.stderr = io.StringIO()
             }
         }
         
+        // ── Desktop Widget System ────────────────────────────────────────────
+        const WIDGETS_KEY = 'puterra_widgets';
+
+        function saveWidgets() {
+            const layer = document.getElementById('widgetLayer');
+            if (!layer) return;
+            const state = [];
+            layer.querySelectorAll('.desktop-widget').forEach(w => {
+                state.push({
+                    id:       w.dataset.wid,
+                    filePath: w.dataset.filepath,
+                    x:        parseInt(w.style.left)  || 60,
+                    y:        parseInt(w.style.top)   || 60,
+                    width:    parseInt(w.style.width)  || 320,
+                    height:   parseInt(w.style.height) || 240,
+                });
+            });
+            localStorage.setItem(WIDGETS_KEY, JSON.stringify(state));
+        }
+
+        function loadSavedWidgets() {
+            try {
+                const saved = JSON.parse(localStorage.getItem(WIDGETS_KEY) || '[]');
+                saved.forEach(w => createDesktopWidget(w.filePath, w.x, w.y, w.width, w.height, w.id));
+            } catch(e) {}
+        }
+
+        function createDesktopWidget(filePath, x, y, w, h, existingId) {
+            const layer = document.getElementById('widgetLayer');
+            if (!layer) return;
+
+            const id       = existingId || ('w' + Date.now());
+            const username = currentUser?.username || 'guest';
+            const token    = localStorage.getItem('auth_token') || '';
+            const title    = filePath.split('/').pop();
+            const pathParts = filePath.split('/').map(encodeURIComponent).join('/');
+            const src = `/api/files/view/${username}/${pathParts}?token=${token}`;
+
+            // Default position: slightly offset from top-left
+            x = x ?? (60 + Math.random() * 80 | 0);
+            y = y ?? (60 + Math.random() * 60 | 0);
+            w = w || 320;
+            h = h || 240;
+
+            const div = document.createElement('div');
+            div.className   = 'desktop-widget';
+            div.id          = `dw-${id}`;
+            div.dataset.wid = id;
+            div.dataset.filepath = filePath;
+            div.style.cssText = `left:${x}px;top:${y}px;width:${w}px;height:${h}px;`;
+
+            div.innerHTML = `
+                <div class="widget-handle" id="wh-${id}">
+                    <span class="wh-title">📌 ${title}</span>
+                    <button class="wh-btn" title="Reload"
+                        onclick="document.getElementById('wf-${id}').src=document.getElementById('wf-${id}').src">
+                        <i class="fas fa-redo-alt"></i>
+                    </button>
+                    <button class="wh-btn" title="Open in viewer"
+                        onclick="openHtmlViewer('${filePath}')">
+                        <i class="fas fa-expand-alt"></i>
+                    </button>
+                    <button class="wh-btn close" title="Remove widget"
+                        onclick="removeWidget('${id}')">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <iframe id="wf-${id}" class="widget-iframe"
+                    src="${src}"
+                    sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"
+                    allow="camera; microphone">
+                </iframe>
+                <div class="widget-resize" id="wr-${id}"></div>`;
+
+            layer.appendChild(div);
+            makeWidgetDraggable(div, document.getElementById(`wh-${id}`));
+            makeWidgetResizable(div, document.getElementById(`wr-${id}`));
+
+            // Focus on click
+            div.addEventListener('mousedown', () => {
+                layer.querySelectorAll('.desktop-widget').forEach(w => w.classList.remove('widget-focused'));
+                div.classList.add('widget-focused');
+            });
+
+            saveWidgets();
+            return div;
+        }
+
+        function removeWidget(id) {
+            const el = document.getElementById(`dw-${id}`);
+            if (el) el.remove();
+            saveWidgets();
+        }
+
+        function makeWidgetDraggable(widget, handle) {
+            let ox, oy, startX, startY, dragging = false;
+            handle.addEventListener('mousedown', e => {
+                if (e.target.closest('button')) return;
+                dragging = true;
+                startX = e.clientX; startY = e.clientY;
+                ox = parseInt(widget.style.left) || 0;
+                oy = parseInt(widget.style.top)  || 0;
+                e.preventDefault();
+            });
+            document.addEventListener('mousemove', e => {
+                if (!dragging) return;
+                widget.style.left = Math.max(0, ox + e.clientX - startX) + 'px';
+                widget.style.top  = Math.max(0, oy + e.clientY - startY) + 'px';
+            });
+            document.addEventListener('mouseup', () => {
+                if (dragging) { dragging = false; saveWidgets(); }
+            });
+            // Touch
+            handle.addEventListener('touchstart', e => {
+                if (e.target.closest('button')) return;
+                dragging = true;
+                startX = e.touches[0].clientX; startY = e.touches[0].clientY;
+                ox = parseInt(widget.style.left) || 0;
+                oy = parseInt(widget.style.top)  || 0;
+            }, {passive: true});
+            document.addEventListener('touchmove', e => {
+                if (!dragging) return;
+                widget.style.left = Math.max(0, ox + e.touches[0].clientX - startX) + 'px';
+                widget.style.top  = Math.max(0, oy + e.touches[0].clientY - startY) + 'px';
+            }, {passive: true});
+            document.addEventListener('touchend', () => {
+                if (dragging) { dragging = false; saveWidgets(); }
+            });
+        }
+
+        function makeWidgetResizable(widget, handle) {
+            let startX, startY, startW, startH, resizing = false;
+            handle.addEventListener('mousedown', e => {
+                resizing = true;
+                startX = e.clientX; startY = e.clientY;
+                startW = widget.offsetWidth;
+                startH = widget.offsetHeight;
+                e.preventDefault(); e.stopPropagation();
+            });
+            document.addEventListener('mousemove', e => {
+                if (!resizing) return;
+                widget.style.width  = Math.max(160, startW + e.clientX - startX) + 'px';
+                widget.style.height = Math.max(100, startH + e.clientY - startY) + 'px';
+            });
+            document.addEventListener('mouseup', () => {
+                if (resizing) { resizing = false; saveWidgets(); }
+            });
+        }
+
+        function pinAsWidget() {
+            const ctx = folderContext;
+            hideContextMenu();
+            // From folder window context
+            if (ctx && !ctx.isDir) {
+                createDesktopWidget(ctx.fullPath);
+                showToast(`📌 ${ctx.name} pinned to desktop`, 'success');
+                return;
+            }
+            // From main file manager
+            if (selectedItems.length !== 1) return;
+            const f = files[selectedItems[0]];
+            if (!f) return;
+            const filePath = currentPath ? `${currentPath}/${f.name}` : f.name;
+            createDesktopWidget(filePath);
+            showToast(`📌 ${f.name} pinned to desktop`, 'success');
+        }
+
         // ── HTML / Widget Viewer ──────────────────────────────────────────────
         function openHtmlViewer(name) {
             const username = currentUser?.username || 'guest';
@@ -4157,11 +4413,13 @@ sys.stderr = io.StringIO()
         document.addEventListener('contextmenu', (e) => {
             if (document.getElementById('desktopScreen').classList.contains('hidden')) return;
             e.preventDefault();
-            
+
             const menu = document.getElementById('contextMenu');
-            const renameItem = document.getElementById('renameMenuItem');
-            const deleteItem = document.getElementById('deleteMenuItem');
-            
+            const renameItem  = document.getElementById('renameMenuItem');
+            const deleteItem  = document.getElementById('deleteMenuItem');
+            const pinItem     = document.getElementById('pinWidgetMenuItem');
+            const pinDivider  = document.getElementById('pinWidgetDivider');
+
             // Show/hide rename/delete based on selection
             if (selectedItems.length === 1) {
                 renameItem.style.display = 'flex';
@@ -4173,9 +4431,19 @@ sys.stderr = io.StringIO()
                 renameItem.style.display = 'none';
                 deleteItem.style.display = 'none';
             }
-            
-            menu.style.left = `${Math.min(e.pageX, window.innerWidth - 170)}px`;
-            menu.style.top = `${Math.min(e.pageY, window.innerHeight - 200)}px`;
+
+            // Show "Pin as Widget" only for a single .html/.htm/.svg file
+            const isHtmlFile = selectedItems.length === 1 && (() => {
+                const f = files[selectedItems[0]];
+                if (!f || f.is_dir) return false;
+                const ext = (f.name.split('.').pop() || '').toLowerCase();
+                return ['html','htm','xhtml','svg'].includes(ext);
+            })();
+            pinItem.style.display    = isHtmlFile ? 'flex' : 'none';
+            pinDivider.style.display = isHtmlFile ? 'block' : 'none';
+
+            menu.style.left = `${Math.min(e.pageX, window.innerWidth - 180)}px`;
+            menu.style.top  = `${Math.min(e.pageY, window.innerHeight - 220)}px`;
             menu.classList.remove('hidden');
         });
         
@@ -4188,13 +4456,20 @@ sys.stderr = io.StringIO()
 
         function setFolderContext(fullPath, name, isDir, wid, curPath, rootPath, event) {
             folderContext = { fullPath, name, isDir, wid, curPath, rootPath };
-            const menu = document.getElementById('contextMenu');
+            const menu        = document.getElementById('contextMenu');
             const renameMenuItem = document.getElementById('renameMenuItem');
             const deleteMenuItem = document.getElementById('deleteMenuItem');
+            const pinItem     = document.getElementById('pinWidgetMenuItem');
+            const pinDivider  = document.getElementById('pinWidgetDivider');
             renameMenuItem.style.display = 'flex';
             deleteMenuItem.style.display = 'flex';
-            menu.style.left = `${Math.min(event.pageX, window.innerWidth - 170)}px`;
-            menu.style.top = `${Math.min(event.pageY, window.innerHeight - 200)}px`;
+            // Pin as widget for html files in folder windows
+            const ext = (name.split('.').pop() || '').toLowerCase();
+            const canPin = !isDir && ['html','htm','xhtml','svg'].includes(ext);
+            pinItem.style.display    = canPin ? 'flex' : 'none';
+            pinDivider.style.display = canPin ? 'block' : 'none';
+            menu.style.left = `${Math.min(event.pageX, window.innerWidth - 180)}px`;
+            menu.style.top  = `${Math.min(event.pageY, window.innerHeight - 220)}px`;
             menu.classList.remove('hidden');
         }
 
