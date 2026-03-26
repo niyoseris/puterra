@@ -2,8 +2,6 @@
 
 Puterra is a self-hosted, browser-based **Cloud OS** built with a Rust/Actix-web backend and a vanilla JS frontend. It gives every user a personal file system, a multi-conversation AI chat powered by any OpenAI-compatible LLM, an in-browser code editor, and a share-key system so you can expose your AI to others without revealing your actual API key.
 
-![Puterra Screenshot](https://github.com/niyoseris/puterra/raw/master/public/puterra-screenshot.png)
-
 ---
 
 ## Features
