@@ -1345,21 +1345,30 @@ async fn call_llm_chat(
         "stream": false,
     });
 
-    // Think mode: cloud models think by default; only set explicitly when user toggles it
+    // Determine if this is a native Ollama endpoint or OpenAI-compatible (Gemini, OpenAI, Groq, etc.)
+    let is_ollama_native = !api_url.contains("ollama.com") && settings.llm_provider != "openai"
+        || api_url.contains("localhost") || api_url.contains("127.0.0.1");
     let is_cloud = share_key_override.map(|sk| sk.api_url.contains("ollama.com")).unwrap_or(settings.llm_active_source == "cloud");
-    if settings.llm_think {
-        body["think"] = serde_json::json!(true);
-    } else if !is_cloud {
-        // Disable thinking for local models to keep responses fast
-        body["think"] = serde_json::json!(false);
+
+    // Think mode: Ollama-only field, never send to OpenAI-compat APIs
+    if is_ollama_native {
+        if settings.llm_think {
+            body["think"] = serde_json::json!(true);
+        } else if !is_cloud {
+            body["think"] = serde_json::json!(false);
+        }
     }
 
-    // Only send generation params if explicitly non-default (some APIs reject unknown fields)
+    // Generation params: Ollama uses num_predict, OpenAI-compat uses max_tokens
     if (settings.llm_temperature - 0.7).abs() > 0.001 {
         body["temperature"] = serde_json::json!(settings.llm_temperature);
     }
     if settings.llm_max_tokens != 4096 {
-        body["num_predict"] = serde_json::json!(settings.llm_max_tokens);
+        if is_ollama_native {
+            body["num_predict"] = serde_json::json!(settings.llm_max_tokens);
+        } else {
+            body["max_tokens"] = serde_json::json!(settings.llm_max_tokens);
+        }
     }
 
     if let Some(tools) = tools {
