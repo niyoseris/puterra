@@ -1385,67 +1385,98 @@ async fn call_llm_chat(
         }
     }
 
-    let mut req = client
-        .post(&chat_url)
-        .header("Content-Type", "application/json")
-        .json(&body);
-
-    if !api_key.is_empty() {
-        req = req.header("Authorization", format!("Bearer {}", api_key));
-    }
-
     eprintln!("[LLM] Request body: {}", serde_json::to_string(&body).unwrap_or_default().chars().take(500).collect::<String>());
-    match req.send().await {
-        Ok(response) => {
-            match response.text().await {
-                Ok(text) => {
-                    eprintln!("[LLM] Response ({} bytes): {}", text.len(), &text);
 
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                        // Check for error response
-                        if let Some(err) = json.get("error").and_then(|e| e.as_str()) {
-                            return Err(format!("LLM error: {}", err));
-                        }
-                        // Ollama format
-                        if json.get("message").is_some() {
-                            return Ok(json);
-                        }
-                        // OpenAI format → normalize
-                        if let Some(msg) = json.get("choices")
-                            .and_then(|c| c.get(0))
-                            .and_then(|c| c.get("message")) {
-                            return Ok(serde_json::json!({
-                                "message": msg,
-                                "done": true
-                            }));
-                        }
-                        // Unknown JSON format - wrap it
-                        return Err(format!("Unexpected LLM response format: {}", safe_truncate(&text, 300)));
-                    }
-                    // Streaming fallback (newline-delimited JSON)
-                    let mut content = String::new();
-                    let mut found_any = false;
-                    for line in text.lines() {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-                            found_any = true;
-                            if let Some(c) = json.get("message")
-                                .and_then(|m| m.get("content"))
-                                .and_then(|c| c.as_str()) {
-                                content.push_str(c);
-                            }
-                        }
-                    }
-                    if found_any && !content.is_empty() {
-                        Ok(serde_json::json!({"message": {"role": "assistant", "content": content}}))
-                    } else {
-                        Err(format!("Could not parse LLM response: {}", safe_truncate(&text, 200)))
-                    }
+    // Retry loop: handles 429 rate-limit with API-provided retry delay (up to 3 attempts)
+    for attempt in 0..3u32 {
+        let result = client
+            .post(&chat_url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&body)
+            .send()
+            .await;
+
+        let text = match result {
+            Ok(resp) => match resp.text().await {
+                Ok(t) => t,
+                Err(e) => return Err(format!("Error reading LLM response: {}", e)),
+            },
+            Err(e) => return Err(format!("Error calling LLM: {}", e)),
+        };
+
+        eprintln!("[LLM] Response ({} bytes): {}", text.len(), &text);
+
+        // Try to parse as JSON
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            // --- 429 Rate Limit ---
+            let status_code = json.get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_u64())
+                .unwrap_or(0);
+            if status_code == 429 {
+                // Extract retryDelay from details[].retryDelay (e.g. "51s")
+                let retry_secs = json.get("error")
+                    .and_then(|e| e.get("details"))
+                    .and_then(|d| d.as_array())
+                    .and_then(|arr| arr.iter().find_map(|item| {
+                        item.get("retryDelay").and_then(|rd| rd.as_str()).map(|s| {
+                            s.trim_end_matches('s').parse::<u64>().unwrap_or(60)
+                        })
+                    }))
+                    .unwrap_or(60);
+                // Cap at 120s to avoid hanging the agent forever
+                let wait = retry_secs.min(120) + 2;
+                eprintln!("[LLM] ⚠️  Rate limited (429). Waiting {}s before retry {}/3...", wait, attempt + 1);
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                continue; // retry
+            }
+
+            // --- Error response ---
+            if let Some(err_obj) = json.get("error") {
+                let msg = err_obj.get("message").and_then(|m| m.as_str())
+                    .unwrap_or_else(|| err_obj.as_str().unwrap_or("unknown error"));
+                return Err(format!("LLM error: {}", msg));
+            }
+
+            // --- Ollama native format ---
+            if json.get("message").is_some() {
+                return Ok(json);
+            }
+
+            // --- OpenAI-compat format → normalize to Ollama shape ---
+            if let Some(msg) = json.get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("message")) {
+                return Ok(serde_json::json!({
+                    "message": msg,
+                    "done": true
+                }));
+            }
+
+            return Err(format!("Unexpected LLM response format: {}", safe_truncate(&text, 300)));
+        }
+
+        // Streaming fallback (newline-delimited JSON from Ollama local)
+        let mut content = String::new();
+        let mut found_any = false;
+        for line in text.lines() {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+                found_any = true;
+                if let Some(c) = json.get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_str()) {
+                    content.push_str(c);
                 }
-                Err(e) => Err(format!("Error reading LLM response: {}", e)),
             }
         }
-        Err(e) => Err(format!("Error calling LLM: {}", e)),
+        if found_any && !content.is_empty() {
+            return Ok(serde_json::json!({"message": {"role": "assistant", "content": content}}));
+        }
+        return Err(format!("Could not parse LLM response: {}", safe_truncate(&text, 200)));
     }
+
+    Err("LLM rate limited after 3 retries".to_string())
 }
 
 /// Simple LLM call (for chat endpoint) - backwards compatible
