@@ -3407,6 +3407,9 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
             } else {
                 serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string())
             };
+            // tool_call_id required by OpenAI-compat APIs (Gemini, OpenAI, Groq)
+            let tool_call_id = tc.get("id").and_then(|i| i.as_str())
+                .unwrap_or(tool_name).to_string();
 
             // Send tool_call event
             let _ = tx.send(sse_event(&serde_json::json!({
@@ -3422,6 +3425,7 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
 
             messages.push(serde_json::json!({
                 "role": "tool",
+                "tool_call_id": tool_call_id,
                 "content": safe_truncate(&observation, 4000)
             }));
             step_num += 1;
@@ -3483,6 +3487,8 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
                     serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string())
                 };
 
+                let tool_call_id = tc.get("id").and_then(|i| i.as_str())
+                    .unwrap_or(tool_name).to_string();
                 eprintln!("[Agent]   [{}/{}] Executing: {} {}", idx + 1, tool_calls.len(), tool_name, safe_truncate(&args_str, 80));
 
                 // Send tool_call event
@@ -3500,6 +3506,7 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
 
                 messages.push(serde_json::json!({
                     "role": "tool",
+                    "tool_call_id": tool_call_id,
                     "content": safe_truncate(&observation, 4000)
                 }));
                 step_num += 1;
