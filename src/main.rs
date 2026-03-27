@@ -1374,7 +1374,14 @@ async fn call_llm_chat(
 
     if let Some(tools) = tools {
         if !tools.is_empty() {
-            body["tools"] = serde_json::json!(tools);
+            // Ollama Cloud requires property types as arrays ["string"] instead of "string"
+            // OpenAI-compat APIs (Gemini, OpenAI, Groq) require standard string format
+            let tools_to_send = if is_ollama_native {
+                normalize_tool_property_types(tools.to_vec())
+            } else {
+                tools.to_vec()
+            };
+            body["tools"] = serde_json::json!(tools_to_send);
         }
     }
 
@@ -2442,7 +2449,7 @@ fn build_tool_definitions(username: &str) -> Vec<serde_json::Value> {
         }
     }
 
-    normalize_tool_property_types(tools)
+    tools  // normalization is applied in call_llm_chat based on endpoint type
 }
 
 /// Execute a tool directly (no HTTP calls to self)
