@@ -1345,9 +1345,10 @@ async fn call_llm_chat(
         "stream": false,
     });
 
-    // Determine if this is a native Ollama endpoint or OpenAI-compatible (Gemini, OpenAI, Groq, etc.)
-    let is_ollama_native = !api_url.contains("ollama.com") && settings.llm_provider != "openai"
-        || api_url.contains("localhost") || api_url.contains("127.0.0.1");
+    // OpenAI-compat: URL ends with /chat/completions (Gemini, OpenAI, Groq, Together, etc.)
+    // Ollama native: URL ends with /chat or /api/chat
+    let is_openai_compat = chat_url.ends_with("/chat/completions");
+    let is_ollama_native = !is_openai_compat;
     let is_cloud = share_key_override.map(|sk| sk.api_url.contains("ollama.com")).unwrap_or(settings.llm_active_source == "cloud");
 
     // Think mode: Ollama-only field, never send to OpenAI-compat APIs
