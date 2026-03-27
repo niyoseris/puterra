@@ -80,7 +80,7 @@ fn default_timeout_image() -> u64 { 30 }
 fn default_timeout_llm_test() -> u64 { 60 }
 fn default_llm_temperature() -> f64 { 0.7 }
 fn default_llm_max_tokens() -> u64 { 4096 }
-fn default_chat_context_limit() -> usize { 10 }
+fn default_chat_context_limit() -> usize { 200 }
 
 /// Persistent settings stored in data/settings.json
 #[derive(Clone, Serialize, Deserialize)]
@@ -173,7 +173,7 @@ impl Default for Settings {
             llm_provider: "ollama".to_string(),
 
             search_engine: "duckduckgo".to_string(),
-            max_agent_iterations: 6,
+            max_agent_iterations: 100,
             shell_enabled: true,
             admin_password: "changeme".to_string(),
 
@@ -187,7 +187,7 @@ impl Default for Settings {
             llm_max_tokens: 4096,
             llm_think: false,
 
-            chat_context_limit: 10,
+            chat_context_limit: 200,
         }
     }
 }
@@ -4050,7 +4050,7 @@ async fn update_settings(data: web::Data<AppState>, body: web::Json<serde_json::
         settings.search_engine = v.to_string();
     }
     if let Some(v) = body.get("max_agent_iterations").and_then(|v| v.as_u64()) {
-        settings.max_agent_iterations = (v as usize).clamp(1, 20);
+        settings.max_agent_iterations = (v as usize).clamp(1, 500);
     }
     if let Some(v) = body.get("shell_enabled").and_then(|v| v.as_bool()) {
         settings.shell_enabled = v;

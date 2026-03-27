@@ -2136,12 +2136,12 @@
                                     <div style="display:flex;gap:16px;flex-wrap:wrap;">
                                         <div>
                                             <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Max Iterations</label>
-                                            <input type="number" id="set_max_iterations" class="input-field" style="width:90px;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" min="1" max="20" value="6">
-                                            <div style="color:#6b7280;font-size:0.65rem;margin-top:2px;">1 – 20</div>
+                                            <input type="number" id="set_max_iterations" class="input-field" style="width:90px;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" min="1" max="500" value="100">
+                                            <div style="color:#6b7280;font-size:0.65rem;margin-top:2px;">1 – 500</div>
                                         </div>
                                         <div>
                                             <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Chat Context Limit</label>
-                                            <input type="number" id="set_chat_context_limit" class="input-field" style="width:90px;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" min="1" max="50" value="10">
+                                            <input type="number" id="set_chat_context_limit" class="input-field" style="width:90px;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;" min="1" max="1000" value="200">
                                             <div style="color:#6b7280;font-size:0.65rem;margin-top:2px;">messages remembered</div>
                                         </div>
                                     </div>
@@ -2423,7 +2423,7 @@
                     signal: agentAbortController.signal,
                     body: JSON.stringify({
                         message: message,
-                        history: chatHistory.slice(-(cachedSettings?.chat_context_limit || 10)),
+                        history: chatHistory.slice(-(cachedSettings?.chat_context_limit || 200)),
                         model: cachedSettings?.llm_model || undefined,
                         username: username,
                         share_key: cachedShareKey?.id || undefined,
@@ -3193,8 +3193,8 @@ sys.stderr = io.StringIO()
                     }
 
                     // Agent settings
-                    if (el('set_max_iterations')) el('set_max_iterations').value = s.max_agent_iterations || 6;
-                    if (el('set_chat_context_limit')) el('set_chat_context_limit').value = s.chat_context_limit || 10;
+                    if (el('set_max_iterations')) el('set_max_iterations').value = s.max_agent_iterations || 100;
+                    if (el('set_chat_context_limit')) el('set_chat_context_limit').value = s.chat_context_limit || 200;
                     if (el('set_search_engine')) el('set_search_engine').value = s.search_engine || 'duckduckgo';
 
                     // LLM generation
@@ -3254,8 +3254,8 @@ sys.stderr = io.StringIO()
                 llm_model_local: el('set_llm_model_local')?.value,
                 llm_api_url_cloud: el('set_llm_url_cloud')?.value,
                 llm_model_cloud: el('set_llm_model_cloud')?.value,
-                max_agent_iterations: parseInt(el('set_max_iterations')?.value) || 6,
-                chat_context_limit: parseInt(el('set_chat_context_limit')?.value) || 10,
+                max_agent_iterations: parseInt(el('set_max_iterations')?.value) || 100,
+                chat_context_limit: parseInt(el('set_chat_context_limit')?.value) || 200,
                 search_engine: el('set_search_engine')?.value,
                 shell_enabled: el('set_shell_enabled')?.checked ?? true,
 
