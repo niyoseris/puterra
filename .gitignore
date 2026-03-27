@@ -9,3 +9,9 @@ data/settings.json
 data/share_keys.json
 data/users/
 data/memory/
+data/cron/
+data/sessions/
+data/*.png
+data/*.jpg
+data/*.jpeg
+data/public/
