@@ -3992,7 +3992,12 @@ sys.stderr = io.StringIO()
         async function downloadOrViewFile(name, ext) {
             const username = currentUser?.username || 'guest';
             const encodedName = name.split('/').map(encodeURIComponent).join('/');
-            const url = `${API}/files/download/${username}/${encodedName}`;
+            const token = localStorage.getItem('auth_token') || '';
+            // view endpoint accepts ?token= (needed for <video>/<audio> which can't send headers)
+            const mediaExts = ['mp4','webm','mov','mkv','avi','m4v','ogg','mp3','wav','flac','m4a'];
+            const url = mediaExts.includes(ext)
+                ? `${API}/files/view/${username}/${encodedName}?token=${token}`
+                : `${API}/files/download/${username}/${encodedName}`;
             const shortName = name.split('/').pop();
 
             if (ext === 'pdf') {
@@ -4119,7 +4124,7 @@ sys.stderr = io.StringIO()
                 </div>
                 <iframe id="wf-${id}" class="widget-iframe"
                     src="${src}"
-                    sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"
+                    sandbox="allow-scripts allow-forms allow-modals allow-popups"
                     allow="camera; microphone">
                 </iframe>
                 <div class="widget-resize" id="wr-${id}"></div>`;
@@ -4265,7 +4270,7 @@ sys.stderr = io.StringIO()
                     <iframe id="${frameId}"
                         class="html-viewer-frame"
                         src="${baseSrc}"
-                        sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-downloads"
+                        sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads"
                         allow="camera; microphone; clipboard-write"
                         onload="(function(){try{var u=document.getElementById('${frameId}').contentWindow.location.href;var el=document.getElementById('${urlBarId}');if(el&&u)el.textContent=u.replace(/[?&]token=[^&]*/,'');}catch(e){}})()">
                     </iframe>

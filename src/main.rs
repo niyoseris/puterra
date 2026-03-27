@@ -1773,7 +1773,14 @@ window.fetch=function(url,...args){{
                 }
             }
 
-            HttpResponse::Ok().content_type(mime).body(bytes)
+            let is_media = matches!(ext.as_str(), "mp4"|"webm"|"mov"|"mkv"|"avi"|"m4v"|"ogg"|"mp3"|"wav"|"flac"|"m4a");
+            let mut resp = HttpResponse::Ok();
+            resp.content_type(mime);
+            if is_media {
+                resp.insert_header(("Accept-Ranges", "bytes"));
+                resp.insert_header(("Cache-Control", "no-cache"));
+            }
+            resp.body(bytes)
         }
         Err(_) => HttpResponse::NotFound()
             .content_type("text/html")
