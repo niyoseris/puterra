@@ -2084,43 +2084,50 @@ Tool Reuse Strategy:
 
 For ANY task with 3+ steps, or that involves research, writing, data collection, or file creation:
 
-**FIRST — always check for an existing task folder:**
-Before starting anything, run `file_list` and look for `tasks/{}-*` folders.
-- If a matching folder exists: read `plan.md` and `progress.md` IMMEDIATELY.
-  - The user's new message is almost always a CONTINUATION or UPDATE of the existing task (e.g. "now make a video", "also add X", "change Y"). Treat it as an UPDATE unless it is completely unrelated.
-  - On UPDATE: reuse the folder, update `plan.md` with the new goal (keep ✅ completed steps), use `findings.md` to avoid re-doing research, add new steps, continue.
-  - Only create a new folder if the topic is genuinely unrelated to existing tasks.
-- If no matching folder exists: create one and start fresh.
+**ONE FOLDER PER CONVERSATION — strict rule:**
+- This conversation ID is: `{}`
+- Your task folder is: `tasks/{}/` (FIXED — never create a different folder for this conversation)
+- NEVER create `tasks/{}-something-else/` or any other variation. One folder, one conversation.
 
-**At the START of a new task:**
-1. Create a task folder: `tasks/CONV_ID-short-task-slug/`  (e.g. `tasks/{}-istanbul-guide/`)
-2. Write `tasks/FOLDER/plan.md`:
-   - ## Goal: what the user wants
-   - ## Steps: numbered list of every step
-   - ## Status: 🔄 In Progress
+**FIRST — check if the folder exists:**
+Run `file_list` and look for `tasks/{}/`.
+- **Exists** → read `plan.md` and `progress.md` immediately. The new message is a CONTINUATION or UPDATE — update `plan.md` with the new goal, keep ✅ done steps, add new steps, continue.
+- **Doesn't exist** → create `tasks/{}/` and start fresh.
 
-**When the user UPDATES or CHANGES the task:**
+**At the START (folder doesn't exist yet):**
+1. `file_create(name="tasks/{}/", kind="folder")`
+2. Write `tasks/{}/plan.md`: Goal, numbered Steps, Status: 🔄 In Progress
+
+**When the user UPDATES the task (folder already exists):**
 1. Read existing `plan.md` and `progress.md`
-2. Update `plan.md` with the new goal (keep ✅ completed steps)
-3. Add new steps as needed — do NOT discard previous findings
-4. Use `findings.md` to avoid repeating already-done research
-5. Continue from the first incomplete step
+2. Update `plan.md` with the new goal (keep ✅ completed steps, add new ones)
+3. Use `findings.md` to avoid repeating research — NEVER redo completed work
+4. Continue from the first incomplete step
 
 **After EACH completed step:**
-- Update `tasks/FOLDER/progress.md`: ✅ done / 🔄 current / ⏳ remaining
-- Append new findings to `tasks/FOLDER/findings.md`
-- Save created files into `tasks/FOLDER/`
+- Update `tasks/{}/progress.md`: ✅ done / 🔄 current / ⏳ remaining
+- Append new findings to `tasks/{}/findings.md`
+- Save created files into `tasks/{}/`
 
 **On ERROR or unexpected stop:**
-1. Read `tasks/FOLDER/progress.md` → resume from last incomplete step
-2. Read `findings.md` → use existing research, NEVER redo completed work
+1. Read `tasks/{}/progress.md` → resume from last incomplete step
+2. Read `findings.md` → use existing research
 
 **At task COMPLETION:** Set `plan.md` Status to ✅ Complete."#,
-        now.format("%Y-%m-%d %H:%M UTC"),
-        username,
-        conv_id,
-        conv_id,
-        conv_id
+        now.format("%Y-%m-%d %H:%M UTC"),  // {0} date
+        username,                           // {1} username
+        conv_id,   // {2}  header: Conversation ID
+        conv_id,   // {3}  "This conversation ID is: `{}`"
+        conv_id,   // {4}  "tasks/{}/" fixed folder
+        conv_id,   // {5}  "tasks/{}-something-else/"
+        conv_id,   // {6}  "look for tasks/{}/"
+        conv_id,   // {7}  "Doesn't exist → create tasks/{}/"
+        conv_id,   // {8}  file_create "tasks/{}/"
+        conv_id,   // {9}  "tasks/{}/plan.md"
+        conv_id,   // {10} "tasks/{}/progress.md"
+        conv_id,   // {11} "tasks/{}/findings.md"
+        conv_id,   // {12} "tasks/{}/" save files
+        conv_id,   // {13} "tasks/{}/progress.md" error section
     )
 }
 
@@ -3112,20 +3119,32 @@ Final Answer: [your complete answer with markdown formatting]
 
 For ANY task with 3+ steps (research, writing, data collection, file creation):
 
-**FIRST — check existing task folder:** Look for `tasks/{}-*` folders.
-- Found → read plan.md & progress.md. The new message is almost always a CONTINUATION (e.g. "now make a video", "add X"). Treat as UPDATE: reuse folder, update plan.md, keep ✅ steps, use findings.md. Only create a new folder if completely unrelated.
-- Not found → create new folder.
+**ONE FOLDER PER CONVERSATION — strict rule:**
+- This conversation ID is: `{}`
+- Your task folder is: `tasks/{}/` — FIXED. Never create any other folder for this conversation.
 
-**When user UPDATES the task:** Read plan.md/progress.md → update goal → keep ✅ completed steps → add new steps → use findings.md (NEVER redo research already done).
+**FIRST — check if folder exists:** Look for `tasks/{}/` in file_list.
+- **Found** → read plan.md & progress.md immediately. The new message is a CONTINUATION or UPDATE — update plan.md (keep ✅ steps), use findings.md, continue.
+- **Not found** → create `tasks/{}/` and write plan.md.
 
-**New task folder:** `tasks/CONV_ID-slug/plan.md` (e.g. `tasks/{}-guide/`)
+**When user UPDATES the task:** Read plan.md/progress.md → update goal → keep ✅ steps → use findings.md → NEVER redo completed research.
 
-**After EACH step:** Update `tasks/FOLDER/progress.md` (✅/🔄/⏳), append to findings.md.
+**After EACH step:** Update `tasks/{}/progress.md` (✅/🔄/⏳), append to `tasks/{}/findings.md`.
 
-**On ERROR:** Read progress.md → resume from last incomplete step. NEVER restart.
+**On ERROR:** Read `tasks/{}/progress.md` → resume from last incomplete step. NEVER restart.
 
 **On COMPLETION:** Mark plan.md as ✅ Complete."#,
-        now.format("%Y-%m-%d %H:%M UTC"), username, conv_id, conv_id, conv_id)
+        now.format("%Y-%m-%d %H:%M UTC"), // {0}
+        username,                          // {1}
+        conv_id,   // {2} header
+        conv_id,   // {3} "This conversation ID is"
+        conv_id,   // {4} "tasks/{}/" fixed folder
+        conv_id,   // {5} "Look for tasks/{}/"
+        conv_id,   // {6} "create tasks/{}/"
+        conv_id,   // {7} "tasks/{}/progress.md" after each step
+        conv_id,   // {8} "tasks/{}/findings.md"
+        conv_id,   // {9} "tasks/{}/progress.md" on error
+    )
 }
 
 /// Parse ReAct-style response (fallback)
