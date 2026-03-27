@@ -29,6 +29,20 @@ struct User {
     password_hash: String,
 }
 
+const USERS_PATH: &str = "data/users.json";
+
+fn load_users() -> HashMap<String, User> {
+    std::fs::read_to_string(USERS_PATH)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_users(users: &HashMap<String, User>) {
+    std::fs::create_dir_all("data").ok();
+    std::fs::write(USERS_PATH, serde_json::to_string_pretty(users).unwrap_or_default()).ok();
+}
+
 /// A share key lets a user share their LLM API access without exposing the real key
 #[derive(Clone, Serialize, Deserialize)]
 struct ShareKey {
@@ -1460,6 +1474,8 @@ async fn signup(data: web::Data<AppState>, body: web::Json<SignupRequest>) -> im
         username: body.username.clone(),
         password_hash: hash_password(&body.password),
     });
+    save_users(&users);
+    std::fs::create_dir_all(get_user_dir(&body.username)).ok();
     HttpResponse::Ok().json(serde_json::json!({ "success": true }))
 }
 
@@ -3984,6 +4000,7 @@ async fn update_settings(data: web::Data<AppState>, body: web::Json<serde_json::
             if let Some(admin) = users.get_mut("admin") {
                 admin.password_hash = hash_password(v);
             }
+            save_users(&users);
         }
     }
 
@@ -4186,11 +4203,20 @@ async fn main() -> std::io::Result<()> {
         share_keys: Mutex::new(load_share_keys()),
     });
 
-    app_state.users.lock().unwrap().insert("admin".to_string(), User {
-        id: Uuid::new_v4().to_string(),
-        username: "admin".to_string(),
-        password_hash: hash_password(&settings.admin_password),
-    });
+    // Load persisted users, then ensure admin is up-to-date
+    {
+        let mut persisted = load_users();
+        // Always sync admin password from settings (source of truth)
+        persisted.insert("admin".to_string(), User {
+            id: persisted.get("admin").map(|u| u.id.clone()).unwrap_or_else(|| Uuid::new_v4().to_string()),
+            username: "admin".to_string(),
+            password_hash: hash_password(&settings.admin_password),
+        });
+        save_users(&persisted);
+        let user_count = persisted.len();
+        *app_state.users.lock().unwrap() = persisted;
+        println!("Users: {} loaded from disk", user_count);
+    }
 
     std::fs::create_dir_all("data/users/guest").ok();
 
