@@ -2736,7 +2736,7 @@ async fn execute_tool(
                 return format!("Error writing temp file: {}", e);
             }
             let result = match Command::new("python3")
-                .arg(&tmp)
+                .arg("._agent_run.py")
                 .current_dir(&user_dir)
                 .env("PYTHONIOENCODING", "utf-8")
                 .output() {
@@ -2765,7 +2765,7 @@ async fn execute_tool(
             std::fs::create_dir_all(&user_dir).ok();
             let tmp = format!("{}/._agent_run.js", user_dir);
             std::fs::write(&tmp, code).ok();
-            let result = match Command::new("node").arg(&tmp).current_dir(&user_dir).output() {
+            let result = match Command::new("node").arg("._agent_run.js").current_dir(&user_dir).output() {
                 Ok(o) => {
                     let mut r = String::new();
                     let stdout = String::from_utf8_lossy(&o.stdout);
@@ -2785,13 +2785,16 @@ async fn execute_tool(
             let title = input.get("title").and_then(|t| t.as_str()).unwrap_or("Document");
             let content = input.get("content").and_then(|c| c.as_str()).unwrap_or("");
             if content.is_empty() { return "Error: content is required".to_string(); }
-            if filename.contains("..") || filename.contains('/') {
-                return "Error: invalid filename (no paths, just a name like report.pdf)".to_string();
+            if filename.contains("..") {
+                return "Error: invalid filename (path traversal not allowed)".to_string();
             }
             let filename = if !filename.ends_with(".pdf") { format!("{}.pdf", filename) } else { filename.to_string() };
             let user_dir = get_user_dir(username);
-            std::fs::create_dir_all(&user_dir).ok();
             let output_path = format!("{}/{}", user_dir, filename);
+            // Create parent directories if filename contains subpath (e.g. tasks/conv_id/file.pdf)
+            if let Some(parent) = std::path::Path::new(&output_path).parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
             match generate_pdf(title, content, &output_path) {
                 Ok(msg) => msg,
                 Err(e) => format!("PDF creation failed: {}", e),
@@ -2816,7 +2819,8 @@ async fn execute_tool(
                         let (cmd, ext) = if language == "python" { ("python3", "py") } else { ("node", "js") };
                         let tmp = format!("{}/._custom_run.{}", user_dir, ext);
                         std::fs::write(&tmp, &full_code).ok();
-                        let result = match Command::new(cmd).arg(&tmp).current_dir(&user_dir).output() {
+                        let tmp_filename = format!("._custom_run.{}", ext);
+                        let result = match Command::new(cmd).arg(&tmp_filename).current_dir(&user_dir).output() {
                             Ok(o) => {
                                 let stdout = String::from_utf8_lossy(&o.stdout);
                                 let stderr = String::from_utf8_lossy(&o.stderr);
