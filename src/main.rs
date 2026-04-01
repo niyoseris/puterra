@@ -3697,18 +3697,29 @@ fn resolve_url(base: &str, relative: &str) -> Option<String> {
 
 /// Rewrite HTML so all navigable links go through the proxy, and inject helpers
 fn rewrite_css_urls(css: &str, page_url: &str, proxy_prefix: &str) -> String {
-    // Rewrite url(...) in CSS
-    let re = Regex::new(r#"url\((['"]?)([^'")\s]+)\1\)"#).unwrap();
-    let page_url_owned = page_url.to_string();
-    let prefix = proxy_prefix.to_string();
-    re.replace_all(css, move |caps: &regex::Captures| {
-        let quote = &caps[1];
-        let u = &caps[2];
-        match resolve_url(&page_url_owned, u) {
-            Some(abs) => format!("url({}{}{}{})", quote, prefix, urlencoding::encode(&abs), quote),
-            None => caps[0].to_string(),
-        }
-    }).to_string()
+    // Three separate patterns: double-quoted, single-quoted, unquoted
+    // Rust regex doesn't support backreferences, so we handle each quote style separately.
+    let patterns: &[(&str, &str, &str)] = &[
+        (r#"url\("([^"]*)"\)"#, "\"", "\""),
+        (r#"url\('([^']*)'\)"#, "'", "'"),
+        (r#"url\(([^'")\s]+)\)"#, "", ""),
+    ];
+    let mut out = css.to_string();
+    for (pat, open, close) in patterns {
+        let re = Regex::new(pat).unwrap();
+        let page_url_owned = page_url.to_string();
+        let prefix = proxy_prefix.to_string();
+        let o = open.to_string();
+        let c = close.to_string();
+        out = re.replace_all(&out, move |caps: &regex::Captures| {
+            let u = &caps[1];
+            match resolve_url(&page_url_owned, u) {
+                Some(abs) => format!("url({}{}{}{})", o, prefix, urlencoding::encode(&abs), c),
+                None => caps[0].to_string(),
+            }
+        }).to_string();
+    }
+    out
 }
 
 fn rewrite_html(html: &str, page_url: &str, proxy_prefix: &str) -> String {
