@@ -3696,96 +3696,165 @@ fn resolve_url(base: &str, relative: &str) -> Option<String> {
 }
 
 /// Rewrite HTML so all navigable links go through the proxy, and inject helpers
-fn rewrite_html(html: &str, page_url: &str, proxy_prefix: &str) -> String {
-    // Attributes to rewrite (navigation)
-    let nav_attrs = ["href", "action"];
-    // Attributes to rewrite (resources — images, scripts, stylesheets)
-    let res_attrs = ["src", "data-src", "poster"];
+fn rewrite_css_urls(css: &str, page_url: &str, proxy_prefix: &str) -> String {
+    // Rewrite url(...) in CSS
+    let re = Regex::new(r#"url\((['"]?)([^'")\s]+)\1\)"#).unwrap();
+    let page_url_owned = page_url.to_string();
+    let prefix = proxy_prefix.to_string();
+    re.replace_all(css, move |caps: &regex::Captures| {
+        let quote = &caps[1];
+        let u = &caps[2];
+        match resolve_url(&page_url_owned, u) {
+            Some(abs) => format!("url({}{}{}{})", quote, prefix, urlencoding::encode(&abs), quote),
+            None => caps[0].to_string(),
+        }
+    }).to_string()
+}
 
+fn rewrite_html(html: &str, page_url: &str, proxy_prefix: &str) -> String {
+    let all_attrs = ["href", "action", "src", "data-src", "poster", "srcset"];
     let mut out = html.to_string();
 
-    // Inject base tag so relative resource URLs (CSS, images, JS) resolve from original host
-    let base_tag = format!("<base href=\"{}\">", page_url);
+    // 1. Strip existing <meta http-equiv="Content-Security-Policy"> tags
+    let csp_re = Regex::new(r#"(?i)<meta[^>]*http-equiv=["']?content-security-policy["']?[^>]*>"#).unwrap();
+    out = csp_re.replace_all(&out, "").to_string();
+
+    // 2. Strip existing <base> tags so ours takes precedence
+    let base_re = Regex::new(r#"(?i)<base[^>]*>"#).unwrap();
+    out = base_re.replace_all(&out, "").to_string();
+
+    // 3. Inject permissive CSP + base tag right after <head>
+    let inject = format!(
+        "<base href=\"{url}\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;\">",
+        url = page_url
+    );
     if let Some(pos) = out.find("<head>").or_else(|| out.find("<HEAD>")) {
-        out.insert_str(pos + 6, &base_tag);
+        out.insert_str(pos + 6, &inject);
     } else if let Some(pos) = out.find("<html").or_else(|| out.find("<HTML")) {
-        // Find end of opening tag
         if let Some(end) = out[pos..].find('>') {
-            out.insert_str(pos + end + 1, &format!("<head>{}</head>", base_tag));
+            out.insert_str(pos + end + 1, &format!("<head>{}</head>", inject));
+        }
+    } else {
+        out.insert_str(0, &format!("<head>{}</head>", inject));
+    }
+
+    // 4. Rewrite HTML attributes
+    for attr in &all_attrs {
+        if *attr == "srcset" {
+            // srcset has comma-separated "url descriptor" pairs
+            let re = Regex::new(&format!(r#"(?i){}=["']([^"']*)["']"#, attr)).unwrap();
+            let prefix = proxy_prefix.to_string();
+            let page_url_owned = page_url.to_string();
+            out = re.replace_all(&out, move |caps: &regex::Captures| {
+                let srcset = &caps[1];
+                let rewritten: Vec<String> = srcset.split(',').map(|part| {
+                    let part = part.trim();
+                    let mut pieces = part.splitn(2, ' ');
+                    let u = pieces.next().unwrap_or("");
+                    let descriptor = pieces.next().unwrap_or("");
+                    match resolve_url(&page_url_owned, u) {
+                        Some(abs) => {
+                            let proxied = format!("{}{}", prefix, urlencoding::encode(&abs));
+                            if descriptor.is_empty() { proxied } else { format!("{} {}", proxied, descriptor) }
+                        }
+                        None => part.to_string(),
+                    }
+                }).collect();
+                format!("srcset=\"{}\"", rewritten.join(", "))
+            }).to_string();
+        } else {
+            let re = Regex::new(&format!(r#"(?i){}=["']([^"']*)["']"#, attr)).unwrap();
+            let prefix = proxy_prefix.to_string();
+            let page_url_owned = page_url.to_string();
+            let attr_str = attr.to_string();
+            out = re.replace_all(&out, move |caps: &regex::Captures| {
+                let original = &caps[1];
+                match resolve_url(&page_url_owned, original) {
+                    Some(abs) => format!("{}=\"{}{}\"", attr_str, prefix, urlencoding::encode(&abs)),
+                    None => caps[0].to_string(),
+                }
+            }).to_string();
         }
     }
 
-    // Rewrite navigation attributes through proxy
-    for attr in &nav_attrs {
-        let re = Regex::new(&format!(r#"(?i){}=["']([^"']*)["']"#, attr)).unwrap();
-        let prefix = proxy_prefix.to_string();
-        let page_url_owned = page_url.to_string();
-        let attr_str = attr.to_string();
-        out = re.replace_all(&out, move |caps: &regex::Captures| {
-            let original = &caps[1];
-            match resolve_url(&page_url_owned, original) {
-                Some(abs) => format!("{}=\"{}{}\"", attr_str, prefix, urlencoding::encode(&abs)),
-                None => caps[0].to_string(),
-            }
-        }).to_string();
-    }
+    // 5. Rewrite url() inside <style> blocks
+    let style_re = Regex::new(r#"(?is)<style([^>]*)>(.*?)</style>"#).unwrap();
+    let proxy_prefix2 = proxy_prefix.to_string();
+    let page_url2 = page_url.to_string();
+    out = style_re.replace_all(&out, move |caps: &regex::Captures| {
+        let attrs = &caps[1];
+        let css = &caps[2];
+        let rewritten = rewrite_css_urls(css, &page_url2, &proxy_prefix2);
+        format!("<style{}>{}</style>", attrs, rewritten)
+    }).to_string();
 
-    // Rewrite resource src attributes through proxy (images etc pass-through)
-    for attr in &res_attrs {
-        let re = Regex::new(&format!(r#"(?i){}=["']([^"']*)["']"#, attr)).unwrap();
-        let prefix = proxy_prefix.to_string();
-        let page_url_owned = page_url.to_string();
-        let attr_str = attr.to_string();
-        out = re.replace_all(&out, move |caps: &regex::Captures| {
-            let original = &caps[1];
-            match resolve_url(&page_url_owned, original) {
-                Some(abs) => format!("{}=\"{}{}\"", attr_str, prefix, urlencoding::encode(&abs)),
-                None => caps[0].to_string(),
-            }
-        }).to_string();
-    }
-
-    // Inject navigation bridge script before </body>
-    let bridge = r#"<script>
-(function(){
-    function notifyParent(type, data) {
-        try { window.parent.postMessage(Object.assign({type}, data), '*'); } catch(e){}
-    }
-    // Report page loaded
-    window.addEventListener('load', function() {
-        notifyParent('browser_loaded', {
-            url: document.querySelector('base')?.href || location.href,
+    // 6. Inject navigation bridge + fetch/XHR interceptor
+    let bridge = format!(r#"<script>
+(function(){{
+    var _PROXY = {proxy_prefix_json};
+    function proxyUrl(u) {{
+        if (!u || u.startsWith('data:') || u.startsWith('blob:') || u.startsWith('#')) return u;
+        if (u.startsWith('/api/browser/proxy')) return u;
+        try {{
+            var abs = new URL(u, document.querySelector('base')?.href || location.href).href;
+            if (abs.startsWith('http://') || abs.startsWith('https://'))
+                return _PROXY + encodeURIComponent(abs);
+        }} catch(e){{}}
+        return u;
+    }}
+    function notifyParent(type, data) {{
+        try {{ window.parent.postMessage(Object.assign({{type}}, data), '*'); }} catch(e){{}}
+    }}
+    window.addEventListener('load', function() {{
+        notifyParent('browser_loaded', {{
+            url: document.querySelector('base')?.href || '{page_url}',
             title: document.title
-        });
-    });
-    // Intercept clicks on non-proxied links (fallback)
-    document.addEventListener('click', function(e) {
+        }});
+    }});
+    // Override fetch to go through proxy
+    var _origFetch = window.fetch;
+    window.fetch = function(input, init) {{
+        if (typeof input === 'string') input = proxyUrl(input);
+        else if (input instanceof Request) input = new Request(proxyUrl(input.url), input);
+        return _origFetch.call(this, input, init);
+    }};
+    // Override XMLHttpRequest
+    var _origOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url) {{
+        arguments[1] = proxyUrl(url);
+        return _origOpen.apply(this, arguments);
+    }};
+    // Intercept non-proxied link clicks
+    document.addEventListener('click', function(e) {{
         var a = e.target.closest('a');
         if (!a) return;
         var href = a.getAttribute('href');
         if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
-        if (!a.href.includes('/api/browser/proxy')) {
+        if (a.href && !a.href.includes('/api/browser/proxy')) {{
             e.preventDefault();
-            notifyParent('browser_navigate', { url: a.href });
-        }
-    }, true);
-    // Intercept form submits
-    document.addEventListener('submit', function(e) {
+            notifyParent('browser_navigate', {{ url: a.href }});
+        }}
+    }}, true);
+    // Intercept GET form submits
+    document.addEventListener('submit', function(e) {{
         var form = e.target;
         if (!form.action || form.action.includes('/api/browser/proxy')) return;
-        if (form.method.toLowerCase() !== 'get') return;
+        if ((form.method || 'get').toLowerCase() !== 'get') return;
         e.preventDefault();
         var params = new URLSearchParams(new FormData(form)).toString();
         var url = form.action + (form.action.includes('?') ? '&' : '?') + params;
-        notifyParent('browser_navigate', { url: url });
-    }, true);
-})();
-</script>"#;
+        notifyParent('browser_navigate', {{ url: url }});
+    }}, true);
+}})();
+</script>"#,
+        proxy_prefix_json = serde_json::to_string(proxy_prefix).unwrap_or_default(),
+        page_url = page_url.replace('\'', "\\'"),
+    );
 
     if let Some(pos) = out.rfind("</body>").or_else(|| out.rfind("</BODY>")) {
-        out.insert_str(pos, bridge);
+        out.insert_str(pos, &bridge);
     } else {
-        out.push_str(bridge);
+        out.push_str(&bridge);
     }
 
     out
@@ -3829,9 +3898,8 @@ async fn browser_proxy(
         map[&username].clone()
     };
 
-    // Forward select headers from the real browser
+    // Forward select headers from the real browser.
     // NOTE: do NOT forward accept-encoding — reqwest handles decompression internally.
-    // If we forward it and upstream sends brotli, reqwest can't decode → garbled output.
     let mut rb = client.get(&url);
     for header_name in &["accept", "accept-language"] {
         if let Some(val) = req.headers().get(*header_name) {
@@ -3840,7 +3908,9 @@ async fn browser_proxy(
             }
         }
     }
-    // Also forward any custom cookies the user set via Set-Cookie UI
+    // Add Referer so sites that check it don't reject the request
+    rb = rb.header("referer", parsed_url.origin().ascii_serialization() + "/");
+    // Forward any custom cookies the user injected via cookie dialog
     if let Some(cookie_hdr) = query.get("cookies") {
         rb = rb.header("cookie", cookie_hdr.as_str());
     }
@@ -3862,14 +3932,31 @@ async fn browser_proxy(
     let final_url = response.url().to_string();
     let proxy_prefix = format!("/api/browser/proxy?user={}&url=", urlencoding::encode(&username));
 
-    // Pass through non-HTML resources directly
+    let ok_status = actix_web::http::StatusCode::from_u16(status.as_u16())
+        .unwrap_or(actix_web::http::StatusCode::OK);
+
+    // Rewrite CSS files (url() references)
+    if content_type.contains("text/css") {
+        let css = match response.text().await {
+            Ok(t) => t,
+            Err(e) => return HttpResponse::BadGateway().body(format!("Read error: {}", e)),
+        };
+        let rewritten = rewrite_css_urls(&css, &final_url, &proxy_prefix);
+        return HttpResponse::build(ok_status)
+            .content_type("text/css; charset=utf-8")
+            .insert_header(("Access-Control-Allow-Origin", "*"))
+            .body(rewritten);
+    }
+
+    // Pass through non-HTML/non-CSS resources directly
     if !content_type.contains("text/html") {
         let bytes = match response.bytes().await {
             Ok(b) => b,
             Err(e) => return HttpResponse::BadGateway().body(format!("Read error: {}", e)),
         };
-        return HttpResponse::build(actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap_or(actix_web::http::StatusCode::OK))
+        return HttpResponse::build(ok_status)
             .content_type(content_type)
+            .insert_header(("Access-Control-Allow-Origin", "*"))
             .body(bytes);
     }
 
@@ -3880,11 +3967,15 @@ async fn browser_proxy(
 
     let rewritten = rewrite_html(&html, &final_url, &proxy_prefix);
 
-    HttpResponse::build(actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap_or(actix_web::http::StatusCode::OK))
+    HttpResponse::build(ok_status)
         .content_type("text/html; charset=utf-8")
-        // Remove headers that prevent embedding
+        // Strip headers that block iframe embedding or resource loading
         .insert_header(("X-Frame-Options", "ALLOWALL"))
         .insert_header(("Access-Control-Allow-Origin", "*"))
+        .insert_header(("Access-Control-Allow-Methods", "GET, POST, OPTIONS"))
+        .insert_header(("Cross-Origin-Resource-Policy", "cross-origin"))
+        .insert_header(("Cross-Origin-Embedder-Policy", "unsafe-none"))
+        .insert_header(("Cross-Origin-Opener-Policy", "unsafe-none"))
         .body(rewritten)
 }
 
