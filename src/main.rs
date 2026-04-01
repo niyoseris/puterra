@@ -1,4 +1,4 @@
-use actix_web::{web, App, HttpServer, HttpResponse, Responder, get, post, delete};
+use actix_web::{web, App, HttpServer, HttpResponse, HttpRequest, Responder, get, post, delete};
 use actix_files as fs;
 use actix_multipart::Multipart;
 use futures::StreamExt;
@@ -217,6 +217,7 @@ struct AppState {
     settings: Mutex<Settings>,
     sessions: Mutex<HashMap<String, Session>>,  // token -> Session
     share_keys: Mutex<HashMap<String, ShareKey>>,
+    browser_clients: Mutex<HashMap<String, reqwest::Client>>, // username -> cookie-jar client
 }
 
 #[derive(Serialize)]
@@ -3673,6 +3674,230 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
 }
 
 // ============================================================
+// BROWSER PROXY
+// ============================================================
+
+/// Resolve a URL relative to a base URL
+fn resolve_url(base: &str, relative: &str) -> Option<String> {
+    if relative.is_empty()
+        || relative.starts_with("javascript:")
+        || relative.starts_with("data:")
+        || relative.starts_with('#')
+        || relative.starts_with("mailto:")
+        || relative.starts_with("tel:")
+    {
+        return None;
+    }
+    if relative.starts_with("http://") || relative.starts_with("https://") {
+        return Some(relative.to_string());
+    }
+    let base_url = url::Url::parse(base).ok()?;
+    base_url.join(relative).ok().map(|u| u.to_string())
+}
+
+/// Rewrite HTML so all navigable links go through the proxy, and inject helpers
+fn rewrite_html(html: &str, page_url: &str, proxy_prefix: &str) -> String {
+    // Attributes to rewrite (navigation)
+    let nav_attrs = ["href", "action"];
+    // Attributes to rewrite (resources — images, scripts, stylesheets)
+    let res_attrs = ["src", "data-src", "poster"];
+
+    let mut out = html.to_string();
+
+    // Inject base tag so relative resource URLs (CSS, images, JS) resolve from original host
+    let base_tag = format!("<base href=\"{}\">", page_url);
+    if let Some(pos) = out.find("<head>").or_else(|| out.find("<HEAD>")) {
+        out.insert_str(pos + 6, &base_tag);
+    } else if let Some(pos) = out.find("<html").or_else(|| out.find("<HTML")) {
+        // Find end of opening tag
+        if let Some(end) = out[pos..].find('>') {
+            out.insert_str(pos + end + 1, &format!("<head>{}</head>", base_tag));
+        }
+    }
+
+    // Rewrite navigation attributes through proxy
+    for attr in &nav_attrs {
+        let re = Regex::new(&format!(r#"(?i){}=["']([^"']*)["']"#, attr)).unwrap();
+        let prefix = proxy_prefix.to_string();
+        let page_url_owned = page_url.to_string();
+        let attr_str = attr.to_string();
+        out = re.replace_all(&out, move |caps: &regex::Captures| {
+            let original = &caps[1];
+            match resolve_url(&page_url_owned, original) {
+                Some(abs) => format!("{}=\"{}{}\"", attr_str, prefix, urlencoding::encode(&abs)),
+                None => caps[0].to_string(),
+            }
+        }).to_string();
+    }
+
+    // Rewrite resource src attributes through proxy (images etc pass-through)
+    for attr in &res_attrs {
+        let re = Regex::new(&format!(r#"(?i){}=["']([^"']*)["']"#, attr)).unwrap();
+        let prefix = proxy_prefix.to_string();
+        let page_url_owned = page_url.to_string();
+        let attr_str = attr.to_string();
+        out = re.replace_all(&out, move |caps: &regex::Captures| {
+            let original = &caps[1];
+            match resolve_url(&page_url_owned, original) {
+                Some(abs) => format!("{}=\"{}{}\"", attr_str, prefix, urlencoding::encode(&abs)),
+                None => caps[0].to_string(),
+            }
+        }).to_string();
+    }
+
+    // Inject navigation bridge script before </body>
+    let bridge = r#"<script>
+(function(){
+    function notifyParent(type, data) {
+        try { window.parent.postMessage(Object.assign({type}, data), '*'); } catch(e){}
+    }
+    // Report page loaded
+    window.addEventListener('load', function() {
+        notifyParent('browser_loaded', {
+            url: document.querySelector('base')?.href || location.href,
+            title: document.title
+        });
+    });
+    // Intercept clicks on non-proxied links (fallback)
+    document.addEventListener('click', function(e) {
+        var a = e.target.closest('a');
+        if (!a) return;
+        var href = a.getAttribute('href');
+        if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+        if (!a.href.includes('/api/browser/proxy')) {
+            e.preventDefault();
+            notifyParent('browser_navigate', { url: a.href });
+        }
+    }, true);
+    // Intercept form submits
+    document.addEventListener('submit', function(e) {
+        var form = e.target;
+        if (!form.action || form.action.includes('/api/browser/proxy')) return;
+        if (form.method.toLowerCase() !== 'get') return;
+        e.preventDefault();
+        var params = new URLSearchParams(new FormData(form)).toString();
+        var url = form.action + (form.action.includes('?') ? '&' : '?') + params;
+        notifyParent('browser_navigate', { url: url });
+    }, true);
+})();
+</script>"#;
+
+    if let Some(pos) = out.rfind("</body>").or_else(|| out.rfind("</BODY>")) {
+        out.insert_str(pos, bridge);
+    } else {
+        out.push_str(bridge);
+    }
+
+    out
+}
+
+#[get("/api/browser/proxy")]
+async fn browser_proxy(
+    req: HttpRequest,
+    query: web::Query<HashMap<String, String>>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let url = match query.get("url") {
+        Some(u) if !u.is_empty() => u.clone(),
+        _ => return HttpResponse::BadRequest().body("Missing url parameter"),
+    };
+    let username = query.get("user").cloned().unwrap_or_else(|| "guest".to_string());
+
+    // Validate URL
+    let parsed_url = match url::Url::parse(&url) {
+        Ok(u) if u.scheme() == "http" || u.scheme() == "https" => u,
+        _ => return HttpResponse::BadRequest().body("Invalid URL — only http/https allowed"),
+    };
+
+    // Get or create per-user reqwest client (with persistent cookie jar)
+    let client = {
+        let mut map = data.browser_clients.lock().unwrap();
+        if !map.contains_key(&username) {
+            let ua = req.headers()
+                .get("user-agent")
+                .and_then(|v: &actix_web::http::header::HeaderValue| v.to_str().ok())
+                .unwrap_or("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+                .to_string();
+            let c = reqwest::Client::builder()
+                .cookie_store(true)
+                .user_agent(ua)
+                .redirect(reqwest::redirect::Policy::limited(10))
+                .build()
+                .unwrap_or_default();
+            map.insert(username.clone(), c);
+        }
+        map[&username].clone()
+    };
+
+    // Forward select headers from the real browser
+    let mut rb = client.get(&url);
+    for header_name in &["accept", "accept-language", "accept-encoding"] {
+        if let Some(val) = req.headers().get(*header_name) {
+            if let Ok(v) = (val as &actix_web::http::header::HeaderValue).to_str() {
+                rb = rb.header(*header_name, v);
+            }
+        }
+    }
+    // Also forward any custom cookies the user set via Set-Cookie UI
+    if let Some(cookie_hdr) = query.get("cookies") {
+        rb = rb.header("cookie", cookie_hdr.as_str());
+    }
+
+    let response = match rb.send().await {
+        Ok(r) => r,
+        Err(e) => return HttpResponse::BadGateway().body(format!("Fetch error: {}", e)),
+    };
+
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("text/html")
+        .to_string();
+
+    // Determine the final URL after any redirects
+    let final_url = response.url().to_string();
+    let proxy_prefix = format!("/api/browser/proxy?user={}&url=", urlencoding::encode(&username));
+
+    // Pass through non-HTML resources directly
+    if !content_type.contains("text/html") {
+        let bytes = match response.bytes().await {
+            Ok(b) => b,
+            Err(e) => return HttpResponse::BadGateway().body(format!("Read error: {}", e)),
+        };
+        return HttpResponse::build(actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap_or(actix_web::http::StatusCode::OK))
+            .content_type(content_type)
+            .body(bytes);
+    }
+
+    let html = match response.text().await {
+        Ok(t) => t,
+        Err(e) => return HttpResponse::BadGateway().body(format!("Read error: {}", e)),
+    };
+
+    let rewritten = rewrite_html(&html, &final_url, &proxy_prefix);
+
+    HttpResponse::build(actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap_or(actix_web::http::StatusCode::OK))
+        .content_type("text/html; charset=utf-8")
+        // Remove headers that prevent embedding
+        .insert_header(("X-Frame-Options", "ALLOWALL"))
+        .insert_header(("Access-Control-Allow-Origin", "*"))
+        .body(rewritten)
+}
+
+/// Clear browser session cookies for a user
+#[post("/api/browser/clear-session")]
+async fn browser_clear_session(
+    query: web::Query<HashMap<String, String>>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let username = query.get("user").cloned().unwrap_or_else(|| "guest".to_string());
+    data.browser_clients.lock().unwrap().remove(&username);
+    HttpResponse::Ok().json(serde_json::json!({"success": true, "message": "Browser session cleared"}))
+}
+
+// ============================================================
 // META ENDPOINTS
 // ============================================================
 
@@ -4360,6 +4585,7 @@ async fn main() -> std::io::Result<()> {
         settings: Mutex::new(settings.clone()),
         sessions: Mutex::new(HashMap::new()),
         share_keys: Mutex::new(load_share_keys()),
+        browser_clients: Mutex::new(HashMap::new()),
     });
 
     // Load persisted users, then ensure admin is up-to-date
@@ -4425,6 +4651,8 @@ async fn main() -> std::io::Result<()> {
             .service(create_share_key)
             .service(list_share_keys)
             .service(revoke_share_key)
+            .service(browser_proxy)
+            .service(browser_clear_session)
             .service(fs::Files::new("/static", "public"))
             .default_service(web::route().to(|| async {
                 fs::NamedFile::open("public/index.html")

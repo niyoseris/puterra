@@ -13,7 +13,8 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 dotenv = "0.15"
-reqwest = { version = "0.11", features = ["json", "blocking"] }
+reqwest = { version = "0.11", features = ["json", "blocking", "cookies"] }
+url = "2"
 regex = "1"
 printpdf = { version = "0.7", features = ["embedded_images"] }
 actix-multipart = "0.6"
