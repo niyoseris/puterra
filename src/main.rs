@@ -3830,8 +3830,10 @@ async fn browser_proxy(
     };
 
     // Forward select headers from the real browser
+    // NOTE: do NOT forward accept-encoding — reqwest handles decompression internally.
+    // If we forward it and upstream sends brotli, reqwest can't decode → garbled output.
     let mut rb = client.get(&url);
-    for header_name in &["accept", "accept-language", "accept-encoding"] {
+    for header_name in &["accept", "accept-language"] {
         if let Some(val) = req.headers().get(*header_name) {
             if let Ok(v) = (val as &actix_web::http::header::HeaderValue).to_str() {
                 rb = rb.header(*header_name, v);
