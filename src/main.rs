@@ -2449,6 +2449,21 @@ fn build_tool_definitions(username: &str) -> Vec<serde_json::Value> {
                 }
             }
         }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "image_download",
+                "description": "Download an image from a URL and save it to the user's cloud storage. Use this after image_search to save images to a folder.",
+                "parameters": {
+                    "type": "object",
+                    "required": ["url", "filename"],
+                    "properties": {
+                        "url": {"type": "string", "description": "The direct image URL to download"},
+                        "filename": {"type": "string", "description": "Where to save the image, e.g. 'slovenia_images/lake_bled.jpg'. Include folder path if needed."}
+                    }
+                }
+            }
+        }),
     ];
 
     // Add custom tools from user's tools directory
@@ -2539,8 +2554,53 @@ async fn execute_tool(
             for (i, r) in results.iter().enumerate() {
                 out += &format!("{}. {}\n   Source: {}\n   Usage: ![image]({})\n\n", i + 1, r.url, r.source, r.url);
             }
-            out += "\nCopy any URL above to use in create_pdf with ![alt](URL)";
+            out += "\nUse image_download to save any of these URLs to a folder.";
             out
+        }
+
+        "image_download" => {
+            let url = input.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            let filename = input.get("filename").and_then(|f| f.as_str()).unwrap_or("");
+            if url.is_empty() { return "Error: url is required".to_string(); }
+            if filename.is_empty() { return "Error: filename is required".to_string(); }
+            if filename.contains("..") { return "Error: invalid filename".to_string(); }
+
+            let user_dir = get_user_dir(username);
+            let output_path = format!("{}/{}", user_dir, filename);
+            if let Some(parent) = std::path::Path::new(&output_path).parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    return format!("Error creating directory: {}", e);
+                }
+            }
+
+            let response = match client
+                .get(url)
+                .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+                .header("Accept", "image/*,*/*;q=0.8")
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => return format!("Error downloading {}: {}", url, e),
+            };
+
+            if !response.status().is_success() {
+                return format!("HTTP {} when downloading {}", response.status(), url);
+            }
+
+            let bytes = match response.bytes().await {
+                Ok(b) => b,
+                Err(e) => return format!("Error reading image data: {}", e),
+            };
+
+            if bytes.len() < 100 {
+                return "Downloaded file too small, likely an error page".to_string();
+            }
+
+            match std::fs::write(&output_path, &bytes) {
+                Ok(_) => format!("Downloaded {} bytes and saved to '{}'", bytes.len(), filename),
+                Err(e) => format!("Error saving file: {}", e),
+            }
         }
 
         "file_list" => {
@@ -2581,6 +2641,19 @@ async fn execute_tool(
             let content = input.get("content").and_then(|c| c.as_str()).unwrap_or("");
             if name.is_empty() || name.contains("..") {
                 return "Error: valid file name is required".to_string();
+            }
+            // Redirect .pdf writes to the proper PDF generator
+            if name.to_lowercase().ends_with(".pdf") {
+                let title = name.trim_end_matches(".pdf").trim_end_matches(".PDF");
+                let user_dir = get_user_dir(username);
+                let output_path = format!("{}/{}", user_dir, name);
+                if let Some(parent) = std::path::Path::new(&output_path).parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                return match generate_pdf(title, content, &output_path) {
+                    Ok(msg) => msg,
+                    Err(e) => format!("PDF creation failed: {}", e),
+                };
             }
             let user_dir = get_user_dir(username);
             let path = format!("{}/{}", user_dir, name);
@@ -3611,6 +3684,7 @@ async fn tools_list() -> impl Responder {
             {"name": "web_search", "description": "Search the web (DuckDuckGo)"},
             {"name": "web_fetch", "description": "Fetch content from a URL"},
             {"name": "image_search", "description": "Search for images and get direct URLs"},
+            {"name": "image_download", "description": "Download an image URL and save to storage"},
             {"name": "shell_exec", "description": "Execute shell commands"},
             {"name": "memory_store", "description": "Store data in memory"},
             {"name": "memory_search", "description": "Search stored memories"},

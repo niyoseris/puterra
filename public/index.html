@@ -60,6 +60,7 @@
         .input-field {
             background: rgba(255, 255, 255, 0.05);
             border: 1px solid rgba(255, 255, 255, 0.1);
+            color: #e5e7eb;
             transition: all 0.2s ease;
         }
         
@@ -1785,10 +1786,11 @@
             
             files.forEach((file, i) => {
                 const icon = file.is_dir ? 'fa-folder text-yellow-400' : getFileIcon(file.name);
+                const fullPath = currentPath ? `${currentPath}/${file.name}` : file.name;
                 html += `
-                    <div class="desktop-icon ${selectedItems.includes(i) ? 'selected' : ''}" 
-                         onclick="selectItem(event, ${i})" 
-                         ondblclick="openFile('${file.name}', ${file.is_dir})">
+                    <div class="desktop-icon ${selectedItems.includes(i) ? 'selected' : ''}"
+                         onclick="selectItem(event, ${i})"
+                         ondblclick="openFile('${fullPath}', ${file.is_dir}, '${file.name}')">
                         <i class="fas ${icon}"></i>
                         <span>${file.name}</span>
                     </div>
