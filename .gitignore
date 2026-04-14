@@ -12,7 +12,19 @@ data/users/
 data/memory/
 data/cron/
 data/sessions/
+data/public/
+
+# User uploaded/generated files — all formats
 data/*.png
 data/*.jpg
 data/*.jpeg
-data/public/
+data/*.gif
+data/*.webp
+data/*.pdf
+data/*.zip
+data/*.mp4
+data/*.mp3
+
+# Per-user storage directories (data/<username>/)
+# Only data/settings.example.json should be committed
+data/*/

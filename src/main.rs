@@ -212,12 +212,20 @@ struct Session {
     username: String,
 }
 
+struct BrowserState {
+    current_url: String,
+    page_title: String,
+    pending_cmds: std::collections::VecDeque<serde_json::Value>, // commands for the frontend browser
+}
+
 struct AppState {
     users: Mutex<HashMap<String, User>>,
     settings: Mutex<Settings>,
     sessions: Mutex<HashMap<String, Session>>,  // token -> Session
     share_keys: Mutex<HashMap<String, ShareKey>>,
     browser_clients: Mutex<HashMap<String, reqwest::Client>>, // username -> cookie-jar client
+    browser_state: Mutex<HashMap<String, BrowserState>>,     // username -> current browser page
+    browser_results: Mutex<HashMap<String, serde_json::Value>>, // cmd_id -> result from frontend
 }
 
 #[derive(Serialize)]
@@ -2503,7 +2511,165 @@ fn build_tool_definitions(username: &str) -> Vec<serde_json::Value> {
         }
     }
 
+    // Browser use tools
+    tools.push(serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "browser_navigate",
+            "description": "Navigate the built-in browser to a URL using the user's persistent session (cookies). Returns the page title and text content. Use this to visit websites, log in, and interact with web pages. The session is shared with the visible browser window.",
+            "parameters": {
+                "type": "object",
+                "required": ["url"],
+                "properties": {
+                    "url": {"type": "string", "description": "Full URL to navigate to (e.g. https://example.com)"}
+                }
+            }
+        }
+    }));
+    tools.push(serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "browser_read_page",
+            "description": "Read the text content of the current browser page. Use after browser_navigate to inspect what's on the page.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    }));
+    tools.push(serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "browser_click",
+            "description": "Click a link on the current browser page by matching its visible text or URL fragment. Navigates to that link.",
+            "parameters": {
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                    "text": {"type": "string", "description": "Visible link text or part of the href to click"}
+                }
+            }
+        }
+    }));
+    tools.push(serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "browser_fill_and_submit",
+            "description": "Fill form fields and optionally submit a form on the current page. Provide field names/labels and their values. Set submit=true to submit the form.",
+            "parameters": {
+                "type": "object",
+                "required": ["fields"],
+                "properties": {
+                    "fields": {
+                        "type": "object",
+                        "description": "Key-value pairs of field name/id/label to value (e.g. {\"q\": \"search query\", \"username\": \"myuser\"})"
+                    },
+                    "submit": {"type": "boolean", "description": "Whether to submit the form after filling (default: true)"},
+                    "form_index": {"type": "integer", "description": "Which form to use if page has multiple (0-based, default: 0)"}
+                }
+            }
+        }
+    }));
+    tools.push(serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "browser_screenshot",
+            "description": "Take a screenshot of the current browser page. Returns a base64 JPEG image along with page content.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    }));
+
     tools  // normalization is applied in call_llm_chat based on endpoint type
+}
+
+/// Send a browser command to the frontend and wait for its result (max 15s).
+/// The frontend executes the command against the real iframe DOM and POSTs the result back.
+async fn browser_send_cmd_and_wait(
+    state: &web::Data<AppState>,
+    username: &str,
+    mut cmd: serde_json::Value,
+) -> String {
+    let cmd_id = format!("{}_{}",
+        username,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    cmd["cmd_id"] = serde_json::json!(cmd_id);
+
+    {
+        let mut bs = state.browser_state.lock().unwrap();
+        let entry = bs.entry(username.to_string()).or_insert_with(|| BrowserState {
+            current_url: String::new(),
+            page_title: String::new(),
+            pending_cmds: std::collections::VecDeque::new(),
+        });
+        entry.pending_cmds.push_back(cmd);
+    }
+
+    let start = std::time::Instant::now();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        if let Some(result) = state.browser_results.lock().unwrap().remove(&cmd_id) {
+            // Update BrowserState url/title from result
+            if let (Some(url), Some(title)) = (
+                result.get("url").and_then(|v| v.as_str()),
+                result.get("title").and_then(|v| v.as_str()),
+            ) {
+                let mut bs = state.browser_state.lock().unwrap();
+                if let Some(entry) = bs.get_mut(username) {
+                    entry.current_url = url.to_string();
+                    entry.page_title = title.to_string();
+                }
+            }
+            return format_browser_result(&result);
+        }
+        if start.elapsed().as_secs() > 15 {
+            return "Timeout: browser penceresi yanıt vermedi. Browser açık mı?".to_string();
+        }
+    }
+}
+
+fn format_browser_result(result: &serde_json::Value) -> String {
+    if let Some(err) = result.get("error").and_then(|e| e.as_str()) {
+        return format!("Browser error: {}", err);
+    }
+    let url = result.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    let title = result.get("title").and_then(|v| v.as_str()).unwrap_or("");
+    let text = result.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let mut out = format!("URL: {}\nTitle: {}\n\n{}", url, title, text);
+    if let Some(links) = result.get("links").and_then(|l| l.as_array()) {
+        if !links.is_empty() {
+            out += "\n\nLinks:\n";
+            for l in links.iter().take(20) {
+                let t = l.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let h = l.get("href").and_then(|v| v.as_str()).unwrap_or("");
+                if !t.is_empty() { out += &format!("- {} → {}\n", t, h); }
+            }
+        }
+    }
+    if let Some(inputs) = result.get("inputs").and_then(|i| i.as_array()) {
+        if !inputs.is_empty() {
+            out += "\n\nForm inputs:\n";
+            for i in inputs {
+                let name = i.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let placeholder = i.get("placeholder").and_then(|v| v.as_str()).unwrap_or("");
+                let itype = i.get("type").and_then(|v| v.as_str()).unwrap_or("text");
+                out += &format!("- [{}] name={} placeholder={}\n", itype, name, placeholder);
+            }
+        }
+    }
+    if let Some(btns) = result.get("buttons").and_then(|b| b.as_array()) {
+        if !btns.is_empty() {
+            out += "\n\nButtons: ";
+            let btn_texts: Vec<&str> = btns.iter()
+                .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+                .take(10).collect();
+            out += &btn_texts.join(", ");
+        }
+    }
+    safe_truncate(&out, 4000).to_string()
 }
 
 /// Execute a tool directly (no HTTP calls to self)
@@ -2512,6 +2678,7 @@ async fn execute_tool(
     input_json: &str,
     username: &str,
     client: &reqwest::Client,
+    state: &web::Data<AppState>,
 ) -> String {
     let input: serde_json::Value = serde_json::from_str(input_json).unwrap_or(serde_json::json!({}));
 
@@ -3121,6 +3288,74 @@ async fn execute_tool(
             format!("Deleted {} cron job(s) matching '{}'", removed, id_or_name)
         }
 
+        // ── browser_navigate ─────────────────────────────────────────────────
+        "browser_navigate" => {
+            let url_raw = input.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            if url_raw.is_empty() { return "Error: url is required".to_string(); }
+
+            // Normalize URL — extract real URL if LLM accidentally passed a proxy URL
+            let url = if url_raw.contains("/api/browser/proxy") || url_raw.contains("api/browser/proxy") {
+                let re = Regex::new(r"[?&]url=([^&\s]+)").unwrap();
+                re.captures(url_raw)
+                    .map(|c| c[1].to_string())
+                    .and_then(|s| urlencoding::decode(&s).ok().map(|d| d.into_owned()))
+                    .unwrap_or_else(|| url_raw.to_string())
+            } else if url_raw.starts_with("http://") || url_raw.starts_with("https://") {
+                url_raw.to_string()
+            } else if url_raw.starts_with("//") {
+                format!("https:{}", url_raw)
+            } else {
+                format!("https://{}", url_raw)
+            };
+
+            browser_send_cmd_and_wait(state, username, serde_json::json!({
+                "action": "open_and_navigate",
+                "url": url
+            })).await
+        }
+
+        // ── browser_read_page ────────────────────────────────────────────────
+        "browser_read_page" => {
+            browser_send_cmd_and_wait(state, username, serde_json::json!({
+                "action": "get_content"
+            })).await
+        }
+
+        // ── browser_click ────────────────────────────────────────────────────
+        "browser_click" => {
+            let text_query = input.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            if text_query.is_empty() { return "Error: text is required".to_string(); }
+
+            browser_send_cmd_and_wait(state, username, serde_json::json!({
+                "action": "click",
+                "text": text_query
+            })).await
+        }
+
+        // ── browser_fill_and_submit ──────────────────────────────────────────
+        "browser_fill_and_submit" => {
+            let fields = match input.get("fields") {
+                Some(f) => f.clone(),
+                None => return "Error: fields object is required".to_string(),
+            };
+            let should_submit = input.get("submit").and_then(|s| s.as_bool()).unwrap_or(true);
+            let form_index = input.get("form_index").and_then(|i| i.as_u64()).unwrap_or(0);
+
+            browser_send_cmd_and_wait(state, username, serde_json::json!({
+                "action": "fill_and_submit",
+                "fields": fields,
+                "submit": should_submit,
+                "form_index": form_index
+            })).await
+        }
+
+        // ── browser_screenshot ───────────────────────────────────────────────
+        "browser_screenshot" => {
+            browser_send_cmd_and_wait(state, username, serde_json::json!({
+                "action": "screenshot"
+            })).await
+        }
+
         _ => format!("Unknown tool: '{}'", tool),
     }
 }
@@ -3269,6 +3504,7 @@ async fn agent_react_fallback(
     share_key: Option<&ShareKey>,
     tx: &mpsc::Sender<String>,
     step_num: &mut usize,
+    state: &web::Data<AppState>,
 ) -> (bool, String) {
     let system_prompt = build_react_system_prompt(username, conv_id);
     let settings = current_settings();
@@ -3333,7 +3569,7 @@ async fn agent_react_fallback(
             // Emit tool_call before execution
             let _ = tx.send(sse_event(&serde_json::json!({"type": "tool_call", "action": act, "action_input": input_str, "step": *step_num}))).await;
 
-            let observation = execute_tool(act, input_str, username, client).await;
+            let observation = execute_tool(act, input_str, username, client, state).await;
 
             // Emit tool_result after execution
             let _ = tx.send(sse_event(&serde_json::json!({"type": "tool_result", "action": act, "observation": safe_truncate(&observation, 500), "step": *step_num}))).await;
@@ -3444,6 +3680,7 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
     });
 
     let (tx, rx) = mpsc::channel::<String>(64);
+    let state = app_data.clone();
 
     // Spawn the agent loop in a background task
     tokio::spawn(async move {
@@ -3498,7 +3735,7 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
         // ReAct fallback — streams events in real-time via tx
         if !native_works {
             let (success, answer) =
-                agent_react_fallback(&client, &message, &history, &username, &conv_id, model_ref, share_key_opt.as_ref(), &tx, &mut step_num).await;
+                agent_react_fallback(&client, &message, &history, &username, &conv_id, model_ref, share_key_opt.as_ref(), &tx, &mut step_num, &state).await;
             let _ = tx.send(sse_event(&serde_json::json!({"type": "answer", "answer": answer, "success": success}))).await;
             let _ = tx.send(sse_event(&serde_json::json!({"type": "done"}))).await;
             return;
@@ -3544,7 +3781,7 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
                 "type": "tool_call", "action": tool_name, "action_input": args_str, "step": step_num
             }))).await;
 
-            let observation = execute_tool(tool_name, &args_str, &username, &client).await;
+            let observation = execute_tool(tool_name, &args_str, &username, &client, &state).await;
 
             // Send tool_result event
             let _ = tx.send(sse_event(&serde_json::json!({
@@ -3624,7 +3861,7 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
                     "type": "tool_call", "action": tool_name, "action_input": args_str, "step": step_num
                 }))).await;
 
-                let observation = execute_tool(tool_name, &args_str, &username, &client).await;
+                let observation = execute_tool(tool_name, &args_str, &username, &client, &state).await;
                 eprintln!("[Agent]   ✓ Result: {}", safe_truncate(&observation, 100));
 
                 // Send tool_result event
@@ -3729,6 +3966,17 @@ fn rewrite_html(html: &str, page_url: &str, proxy_prefix: &str) -> String {
     // 1. Strip existing <meta http-equiv="Content-Security-Policy"> tags
     let csp_re = Regex::new(r#"(?i)<meta[^>]*http-equiv=["']?content-security-policy["']?[^>]*>"#).unwrap();
     out = csp_re.replace_all(&out, "").to_string();
+
+    // 1b. Strip <meta http-equiv="refresh"> tags (they cause direct-URL navigations)
+    let refresh_re = Regex::new(r#"(?i)<meta[^>]*http-equiv=["']?refresh["']?[^>]*>"#).unwrap();
+    out = refresh_re.replace_all(&out, "").to_string();
+
+    // 1c. Strip integrity="..." attributes — SRI hashes break when proxy rewrites resources.
+    // Also strip crossorigin attributes since they're tightly coupled with SRI.
+    let integrity_re = Regex::new(r#"(?i)\s+integrity=["'][^"']*["']"#).unwrap();
+    out = integrity_re.replace_all(&out, "").to_string();
+    let crossorigin_re = Regex::new(r#"(?i)\s+crossorigin(?:=["'][^"']*["'])?"#).unwrap();
+    out = crossorigin_re.replace_all(&out, "").to_string();
 
     // 2. Strip existing <base> tags so ours takes precedence
     let base_re = Regex::new(r#"(?i)<base[^>]*>"#).unwrap();
@@ -3835,6 +4083,20 @@ fn rewrite_html(html: &str, page_url: &str, proxy_prefix: &str) -> String {
         arguments[1] = proxyUrl(url);
         return _origOpen.apply(this, arguments);
     }};
+    // Intercept window.location.assign / replace
+    try {{
+        var _origAssign = window.location.assign.bind(window.location);
+        var _origReplace = window.location.replace.bind(window.location);
+        window.location.assign = function(u) {{ notifyParent('browser_navigate', {{url: proxyUrl(String(u))}});  }};
+        window.location.replace = function(u) {{ notifyParent('browser_navigate', {{url: proxyUrl(String(u))}}); }};
+    }} catch(e) {{}}
+    // Intercept history.pushState / replaceState (SPA navigation)
+    try {{
+        var _origPush = history.pushState.bind(history);
+        var _origReplaceState = history.replaceState.bind(history);
+        history.pushState = function(s,t,url) {{ if (url) notifyParent('browser_navigate', {{url: proxyUrl(String(url))}}); }};
+        history.replaceState = function(s,t,url) {{ if (url) notifyParent('browser_navigate', {{url: proxyUrl(String(url))}}); }};
+    }} catch(e) {{}}
     // Intercept non-proxied link clicks
     document.addEventListener('click', function(e) {{
         var a = e.target.closest('a');
@@ -3846,15 +4108,20 @@ fn rewrite_html(html: &str, page_url: &str, proxy_prefix: &str) -> String {
             notifyParent('browser_navigate', {{ url: a.href }});
         }}
     }}, true);
-    // Intercept GET form submits
+    // Intercept all form submits (GET and POST)
     document.addEventListener('submit', function(e) {{
         var form = e.target;
         if (!form.action || form.action.includes('/api/browser/proxy')) return;
-        if ((form.method || 'get').toLowerCase() !== 'get') return;
         e.preventDefault();
+        var method = (form.method || 'get').toLowerCase();
         var params = new URLSearchParams(new FormData(form)).toString();
-        var url = form.action + (form.action.includes('?') ? '&' : '?') + params;
-        notifyParent('browser_navigate', {{ url: url }});
+        if (method === 'post') {{
+            // Send POST through proxy-post endpoint
+            notifyParent('browser_post', {{ url: form.action, body: params }});
+        }} else {{
+            var url = form.action + (form.action.includes('?') ? '&' : '?') + params;
+            notifyParent('browser_navigate', {{ url: url }});
+        }}
     }}, true);
 }})();
 </script>"#,
@@ -3971,6 +4238,27 @@ async fn browser_proxy(
             .body(bytes);
     }
 
+    // SPA servers return text/html for ALL paths (including .js/.json URLs).
+    // If the requested URL looks like a script/data resource but the server returned HTML,
+    // return an empty stub with the correct MIME type so the browser doesn't throw MIME errors.
+    {
+        let path = parsed_url.path().to_lowercase();
+        let is_script_url = path.ends_with(".js") || path.ends_with(".mjs") || path.ends_with(".ts") || path.ends_with(".jsx") || path.ends_with(".tsx");
+        let is_json_url = path.ends_with(".json") || path.ends_with(".jsonl");
+        if is_script_url {
+            return HttpResponse::build(ok_status)
+                .content_type("application/javascript; charset=utf-8")
+                .insert_header(("Access-Control-Allow-Origin", "*"))
+                .body("/* resource unavailable via proxy */");
+        }
+        if is_json_url {
+            return HttpResponse::build(ok_status)
+                .content_type("application/json; charset=utf-8")
+                .insert_header(("Access-Control-Allow-Origin", "*"))
+                .body("null");
+        }
+    }
+
     let html = match response.text().await {
         Ok(t) => t,
         Err(e) => return HttpResponse::BadGateway().body(format!("Read error: {}", e)),
@@ -3990,6 +4278,72 @@ async fn browser_proxy(
         .body(rewritten)
 }
 
+/// POST proxy — submits a form server-side with the user's cookie jar and returns the result page
+#[post("/api/browser/proxy-post")]
+async fn browser_proxy_post(
+    req: HttpRequest,
+    query: web::Query<HashMap<String, String>>,
+    body: web::Bytes,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let url = match query.get("url") {
+        Some(u) if !u.is_empty() => u.clone(),
+        _ => return HttpResponse::BadRequest().body("Missing url parameter"),
+    };
+    let username = query.get("user").cloned().unwrap_or_else(|| "guest".to_string());
+
+    let parsed_url = match url::Url::parse(&url) {
+        Ok(u) if u.scheme() == "http" || u.scheme() == "https" => u,
+        _ => return HttpResponse::BadRequest().body("Invalid URL"),
+    };
+
+    let client = {
+        let mut map = data.browser_clients.lock().unwrap();
+        if !map.contains_key(&username) {
+            let ua = req.headers()
+                .get("user-agent")
+                .and_then(|v: &actix_web::http::header::HeaderValue| v.to_str().ok())
+                .unwrap_or("Mozilla/5.0")
+                .to_string();
+            let c = reqwest::Client::builder()
+                .cookie_store(true)
+                .user_agent(ua)
+                .redirect(reqwest::redirect::Policy::limited(10))
+                .build()
+                .unwrap_or_default();
+            map.insert(username.clone(), c);
+        }
+        map[&username].clone()
+    };
+
+    let response = match client.post(&url)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("referer", parsed_url.origin().ascii_serialization() + "/")
+        .body(body)
+        .send().await
+    {
+        Ok(r) => r,
+        Err(e) => return HttpResponse::BadGateway().body(format!("POST error: {}", e)),
+    };
+
+    let status = response.status();
+    let final_url = response.url().to_string();
+    let proxy_prefix = format!("/api/browser/proxy?user={}&url=", urlencoding::encode(&username));
+    let ok_status = actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap_or(actix_web::http::StatusCode::OK);
+
+    let html = match response.text().await {
+        Ok(t) => t,
+        Err(e) => return HttpResponse::BadGateway().body(format!("Read error: {}", e)),
+    };
+    let rewritten = rewrite_html(&html, &final_url, &proxy_prefix);
+
+    HttpResponse::build(ok_status)
+        .content_type("text/html; charset=utf-8")
+        .insert_header(("X-Frame-Options", "ALLOWALL"))
+        .insert_header(("Access-Control-Allow-Origin", "*"))
+        .body(rewritten)
+}
+
 /// Clear browser session cookies for a user
 #[post("/api/browser/clear-session")]
 async fn browser_clear_session(
@@ -3999,6 +4353,39 @@ async fn browser_clear_session(
     let username = query.get("user").cloned().unwrap_or_else(|| "guest".to_string());
     data.browser_clients.lock().unwrap().remove(&username);
     HttpResponse::Ok().json(serde_json::json!({"success": true, "message": "Browser session cleared"}))
+}
+
+/// Poll pending browser commands for the frontend (agent → visual browser)
+/// Returns all queued commands and clears the queue.
+#[get("/api/browser/commands")]
+async fn browser_commands(
+    query: web::Query<HashMap<String, String>>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let username = query.get("user").cloned().unwrap_or_else(|| "guest".to_string());
+    let mut bs = data.browser_state.lock().unwrap();
+    let cmds: Vec<serde_json::Value> = bs.get_mut(&username)
+        .map(|s| s.pending_cmds.drain(..).collect())
+        .unwrap_or_default();
+    HttpResponse::Ok()
+        .insert_header(("Access-Control-Allow-Origin", "*"))
+        .json(serde_json::json!({"commands": cmds}))
+}
+
+/// Frontend posts browser command results here (visual browser → agent)
+#[post("/api/browser/result")]
+async fn browser_post_result(
+    query: web::Query<HashMap<String, String>>,
+    body: web::Json<serde_json::Value>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let cmd_id = query.get("cmd_id").cloned().unwrap_or_default();
+    if !cmd_id.is_empty() {
+        data.browser_results.lock().unwrap().insert(cmd_id, body.into_inner());
+    }
+    HttpResponse::Ok()
+        .insert_header(("Access-Control-Allow-Origin", "*"))
+        .json(serde_json::json!({"ok": true}))
 }
 
 // ============================================================
@@ -4690,6 +5077,8 @@ async fn main() -> std::io::Result<()> {
         sessions: Mutex::new(HashMap::new()),
         share_keys: Mutex::new(load_share_keys()),
         browser_clients: Mutex::new(HashMap::new()),
+        browser_state: Mutex::new(HashMap::new()),
+        browser_results: Mutex::new(HashMap::new()),
     });
 
     // Load persisted users, then ensure admin is up-to-date
@@ -4756,7 +5145,10 @@ async fn main() -> std::io::Result<()> {
             .service(list_share_keys)
             .service(revoke_share_key)
             .service(browser_proxy)
+            .service(browser_proxy_post)
             .service(browser_clear_session)
+            .service(browser_commands)
+            .service(browser_post_result)
             .service(fs::Files::new("/static", "public"))
             .default_service(web::route().to(|| async {
                 fs::NamedFile::open("public/index.html")

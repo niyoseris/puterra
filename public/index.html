@@ -1410,6 +1410,200 @@
             loadFiles();
             // Restore pinned widgets after a short delay (token must be ready)
             setTimeout(loadSavedWidgets, 300);
+            // Start global agent-browser command poll
+            startAgentBrowserPoll();
+        }
+
+        // Global poll: checks for agent browser commands, executes them against the real iframe DOM.
+        function startAgentBrowserPoll() {
+            if (window._agentBrowserPollInterval) return;
+            window._agentBrowserPollInterval = setInterval(async () => {
+                const user = currentUser?.username;
+                if (!user) return;
+                try {
+                    const res = await fetch(`/api/browser/commands?user=${encodeURIComponent(user)}`);
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    if (!data.commands || !data.commands.length) return;
+                    for (const cmd of data.commands) {
+                        await executeBrowserCommand(cmd);
+                    }
+                } catch (e) { /* ignore network errors */ }
+            }, 700);
+        }
+
+        async function executeBrowserCommand(cmd) {
+            const user = currentUser?.username || 'guest';
+            let result;
+            try {
+                if (cmd.action === 'open_and_navigate' || cmd.action === 'navigate') {
+                    if (!document.getElementById('window-browser')) {
+                        openApp('browser', true);
+                        await new Promise(r => setTimeout(r, 300));
+                    } else {
+                        const win = document.getElementById('window-browser');
+                        win.style.zIndex = ++windowZIndex;
+                        win.classList.remove('minimized');
+                    }
+                    await navigateAndWait(cmd.url);
+                    result = getIframeDOMContent();
+                } else if (cmd.action === 'open') {
+                    if (!document.getElementById('window-browser')) {
+                        openApp('browser');
+                        await new Promise(r => setTimeout(r, 300));
+                    } else {
+                        const win = document.getElementById('window-browser');
+                        win.style.zIndex = ++windowZIndex;
+                        win.classList.remove('minimized');
+                    }
+                    result = getIframeDOMContent();
+                } else if (cmd.action === 'get_content') {
+                    result = getIframeDOMContent();
+                } else if (cmd.action === 'click') {
+                    result = await clickAndWait(cmd.text || cmd.selector || '');
+                } else if (cmd.action === 'fill_and_submit') {
+                    result = await fillAndSubmit(cmd.fields || {}, cmd.submit !== false, cmd.form_index || 0);
+                } else if (cmd.action === 'screenshot') {
+                    result = await captureScreenshot();
+                }
+                if (result && cmd.cmd_id) {
+                    await fetch(`/api/browser/result?cmd_id=${encodeURIComponent(cmd.cmd_id)}&user=${encodeURIComponent(user)}`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(result)
+                    });
+                }
+            } catch(e) {
+                if (cmd.cmd_id) {
+                    await fetch(`/api/browser/result?cmd_id=${encodeURIComponent(cmd.cmd_id)}&user=${encodeURIComponent(user)}`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({error: String(e)})
+                    }).catch(() => {});
+                }
+            }
+        }
+
+        function getIframeDOMContent() {
+            const iframe = document.getElementById('browser-frame');
+            const doc = iframe?.contentDocument || iframe?.contentWindow?.document;
+            if (!doc || !doc.body) return {error: 'iframe not accessible', url: '', title: '', text: ''};
+
+            let pageUrl = '';
+            try {
+                const proxyUrl = new URL(iframe.src || '', location.href);
+                pageUrl = proxyUrl.searchParams.get('url') || doc.URL || '';
+            } catch(_) { pageUrl = doc.URL || ''; }
+
+            const links = [...doc.querySelectorAll('a[href]')].slice(0, 30).map(a => ({
+                text: (a.innerText || '').trim().substring(0, 80),
+                href: a.href
+            })).filter(l => l.text.length > 0);
+
+            const inputs = [...doc.querySelectorAll('input:not([type=hidden]),textarea,select')].slice(0, 15).map(i => ({
+                type: i.type || i.tagName.toLowerCase(),
+                name: i.name || '',
+                id: i.id || '',
+                placeholder: i.placeholder || '',
+                value: i.value || '',
+                label: (doc.querySelector(`label[for="${i.id}"]`)?.innerText || '').trim()
+            }));
+
+            const buttons = [...doc.querySelectorAll('button,[role=button],input[type=submit],input[type=button]')]
+                .slice(0, 15)
+                .map(b => ({text: (b.innerText || b.value || '').trim().substring(0, 60)}))
+                .filter(b => b.text.length > 0);
+
+            return {
+                url: pageUrl,
+                title: doc.title || '',
+                text: (doc.body.innerText || '').substring(0, 4000),
+                links, inputs, buttons
+            };
+        }
+
+        async function navigateAndWait(url) {
+            const iframe = document.getElementById('browser-frame');
+            browserNavigate(url);
+            await new Promise(resolve => {
+                const timeout = setTimeout(resolve, 10000);
+                iframe.addEventListener('load', () => { clearTimeout(timeout); resolve(); }, {once: true});
+            });
+            await new Promise(r => setTimeout(r, 800));
+        }
+
+        async function clickAndWait(query) {
+            const iframe = document.getElementById('browser-frame');
+            const doc = iframe?.contentDocument || iframe?.contentWindow?.document;
+            if (!doc) return {error: 'iframe not accessible'};
+            const q = query.toLowerCase();
+            const candidates = [...doc.querySelectorAll('a,button,[role=button],input[type=submit],input[type=button],[onclick]')];
+            const el = candidates.find(e =>
+                (e.innerText || e.value || e.getAttribute('aria-label') || '').toLowerCase().includes(q) ||
+                (e.getAttribute('href') || '').toLowerCase().includes(q) ||
+                (e.id || '').toLowerCase().includes(q)
+            );
+            if (!el) return {error: `'${query}' eşleşen element bulunamadı`, ...getIframeDOMContent()};
+            el.click();
+            await new Promise(r => setTimeout(r, 1500));
+            return {clicked: el.tagName + ': ' + (el.innerText || el.value || '').trim().substring(0, 60), ...getIframeDOMContent()};
+        }
+
+        async function fillAndSubmit(fields, doSubmit, formIndex) {
+            const iframe = document.getElementById('browser-frame');
+            const doc = iframe?.contentDocument || iframe?.contentWindow?.document;
+            if (!doc) return {error: 'iframe not accessible'};
+            const forms = [...doc.querySelectorAll('form')];
+            if (!forms.length) return {error: 'Sayfada form bulunamadı', ...getIframeDOMContent()};
+            const form = forms[Math.min(formIndex, forms.length - 1)];
+            const filled = [];
+            for (const [key, value] of Object.entries(fields || {})) {
+                const q = key.toLowerCase();
+                const inputs = [...form.querySelectorAll('input:not([type=hidden]),textarea,select')];
+                const el = inputs.find(i =>
+                    (i.name || '').toLowerCase().includes(q) ||
+                    (i.id || '').toLowerCase().includes(q) ||
+                    (i.placeholder || '').toLowerCase().includes(q) ||
+                    ((doc.querySelector(`label[for="${i.id}"]`)?.innerText || '').toLowerCase().includes(q))
+                );
+                if (el) {
+                    el.focus();
+                    el.value = value;
+                    el.dispatchEvent(new Event('input', {bubbles: true}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                    filled.push(key);
+                }
+            }
+            if (doSubmit) {
+                const submitBtn = form.querySelector('input[type=submit],button[type=submit],button:not([type])');
+                if (submitBtn) submitBtn.click();
+                else form.submit();
+                await new Promise(r => setTimeout(r, 2000));
+            }
+            return {filled, submitted: doSubmit, ...getIframeDOMContent()};
+        }
+
+        async function captureScreenshot() {
+            const iframe = document.getElementById('browser-frame');
+            if (!window.html2canvas) {
+                await new Promise((res, rej) => {
+                    const s = document.createElement('script');
+                    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+                    s.onload = res; s.onerror = rej;
+                    document.head.appendChild(s);
+                });
+            }
+            try {
+                const doc = iframe.contentDocument || iframe.contentWindow?.document;
+                const canvas = await html2canvas(doc.body, {
+                    useCORS: true, allowTaint: true,
+                    width: iframe.offsetWidth,
+                    height: Math.min(iframe.offsetHeight, 900)
+                });
+                return {screenshot: canvas.toDataURL('image/jpeg', 0.6), ...getIframeDOMContent()};
+            } catch(e) {
+                return {error: 'Screenshot alınamadı: ' + e.message, ...getIframeDOMContent()};
+            }
         }
         
         // Check session on load - require login
@@ -1847,7 +2041,8 @@
         }
         
         // Open app
-        function openApp(app) {
+        // skipDefaultNav: if true, don't navigate to the default home page (used by agent commands)
+        function openApp(app, skipDefaultNav) {
             document.querySelectorAll('.taskbar-item').forEach(el => el.classList.remove('active'));
             document.getElementById(`taskbar-${app}`)?.classList.add('active');
             // DON'T clear windowsContainer - keep existing windows
@@ -2084,12 +2279,14 @@
                             }
                         } else if (msg.type === 'browser_navigate') {
                             if (msg.url) browserNavigate(msg.url);
+                        } else if (msg.type === 'browser_post') {
+                            if (msg.url) browserPost(msg.url, msg.body || '');
                         }
                     });
                 }
 
-                // Navigate to a default home page
-                browserNavigate('https://www.google.com');
+                // Navigate to default home page (skip if opened by agent — it will send its own navigate)
+                if (!skipDefaultNav) browserNavigate('https://www.google.com');
 
             } else if (app === 'settings') {
                 createWindow('settings', '⚙️ Settings', `
@@ -3733,6 +3930,42 @@ sys.stderr = io.StringIO()
                     frame.src = browserProxyUrl(url);
                     frame.onload = () => { document.getElementById('browser-loading').style.display = 'none'; };
                 }
+            }
+        }
+
+        async function browserPost(url, body) {
+            const user = currentUser?.username || 'guest';
+            const loading = document.getElementById('browser-loading');
+            const frame = document.getElementById('browser-frame');
+            if (loading) loading.style.display = 'flex';
+            try {
+                const res = await fetch(`/api/browser/proxy-post?user=${encodeURIComponent(user)}&url=${encodeURIComponent(url)}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: body
+                });
+                if (res.redirected) {
+                    browserNavigate(res.url);
+                    return;
+                }
+                const html = await res.text();
+                const blob = new Blob([html], { type: 'text/html' });
+                const blobUrl = URL.createObjectURL(blob);
+                if (frame) {
+                    frame.src = blobUrl;
+                    frame.onload = () => {
+                        if (loading) loading.style.display = 'none';
+                        URL.revokeObjectURL(blobUrl);
+                    };
+                }
+                // Update history
+                window._browserHistory = window._browserHistory.slice(0, window._browserHistoryIdx + 1);
+                window._browserHistory.push(url);
+                window._browserHistoryIdx = window._browserHistory.length - 1;
+                const urlBar = document.getElementById('browser-url');
+                if (urlBar) urlBar.value = url;
+            } catch(e) {
+                if (loading) loading.style.display = 'none';
             }
         }
 
