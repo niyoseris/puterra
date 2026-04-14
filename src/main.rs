@@ -3932,6 +3932,69 @@ fn resolve_url(base: &str, relative: &str) -> Option<String> {
     base_url.join(relative).ok().map(|u| u.to_string())
 }
 
+/// Rewrite dynamic import() and static import-from in a JS file so they route through the proxy.
+/// This fixes SPA bundles that do: import('/api.js') — which would otherwise bypass the proxy
+/// (resolving via <base href> to the real origin) and get HTML back instead of JS.
+fn rewrite_js_imports(js: &str, page_url: &str, proxy_prefix: &str) -> String {
+    let mut out = js.to_string();
+
+    // 1. Dynamic import("...") / import('...')
+    //    Catches:  import("/api.js")  import('./chunk.js')  import("https://cdn.com/x.js")
+    let dyn_dq = Regex::new(r#"import\s*\(\s*"([^"]+)"\s*\)"#).unwrap();
+    let dyn_sq = Regex::new(r#"import\s*\(\s*'([^']+)'\s*\)"#).unwrap();
+    for re in &[dyn_dq, dyn_sq] {
+        let prefix = proxy_prefix.to_string();
+        let purl = page_url.to_string();
+        out = re.replace_all(&out, move |caps: &regex::Captures| {
+            let url = &caps[1];
+            match resolve_url(&purl, url) {
+                Some(abs) => format!("import(\"{}{}\")", prefix, urlencoding::encode(&abs)),
+                None => caps[0].to_string(),
+            }
+        }).to_string();
+    }
+
+    // 2. Static import … from "..." / import … from '...'
+    //    Catches:  import X from '/mod.js'   import {a} from "./b.js"   import '/side.js'
+    let static_dq = Regex::new(r#"((?:import|export)[^'";\n]*from\s*)"([^"]+)""#).unwrap();
+    let static_sq = Regex::new(r#"((?:import|export)[^'";\n]*from\s*)'([^']+)'"#).unwrap();
+    // Side-effect import:  import "/polyfill.js"
+    let side_dq = Regex::new(r#"(?<![a-zA-Z0-9_$])(import\s*)"([^"]+)""#).unwrap();
+    let side_sq = Regex::new(r#"(?<![a-zA-Z0-9_$])(import\s*)'([^']+)'"#).unwrap();
+
+    for re in &[static_dq, static_sq] {
+        let prefix = proxy_prefix.to_string();
+        let purl = page_url.to_string();
+        out = re.replace_all(&out, move |caps: &regex::Captures| {
+            let lead = &caps[1];
+            let url = &caps[2];
+            match resolve_url(&purl, url) {
+                Some(abs) => format!("{}\"{}{}\"", lead, prefix, urlencoding::encode(&abs)),
+                None => caps[0].to_string(),
+            }
+        }).to_string();
+    }
+    for re in &[side_dq, side_sq] {
+        let prefix = proxy_prefix.to_string();
+        let purl = page_url.to_string();
+        out = re.replace_all(&out, move |caps: &regex::Captures| {
+            let lead = &caps[1];
+            let url = &caps[2];
+            // Only rewrite if it looks like a path/URL, not a module name like 'react'
+            if url.starts_with('/') || url.starts_with("./") || url.starts_with("../")
+                || url.starts_with("http://") || url.starts_with("https://") {
+                match resolve_url(&purl, url) {
+                    Some(abs) => return format!("{}\"{}{}\"", lead, prefix, urlencoding::encode(&abs)),
+                    None => {}
+                }
+            }
+            caps[0].to_string()
+        }).to_string();
+    }
+
+    out
+}
+
 /// Rewrite HTML so all navigable links go through the proxy, and inject helpers
 fn rewrite_css_urls(css: &str, page_url: &str, proxy_prefix: &str) -> String {
     // Three separate patterns: double-quoted, single-quoted, unquoted
@@ -4097,6 +4160,32 @@ fn rewrite_html(html: &str, page_url: &str, proxy_prefix: &str) -> String {
         history.pushState = function(s,t,url) {{ if (url) notifyParent('browser_navigate', {{url: proxyUrl(String(url))}}); }};
         history.replaceState = function(s,t,url) {{ if (url) notifyParent('browser_navigate', {{url: proxyUrl(String(url))}}); }};
     }} catch(e) {{}}
+    // Intercept dynamic script injection via document.createElement('script')
+    // Frameworks like Vue/React/Vite sometimes inject <script src="..."> at runtime.
+    // Without this, those src values resolve via <base href> to the real origin → MIME errors.
+    try {{
+        var _origCreateElement = Document.prototype.createElement;
+        Document.prototype.createElement = function(tag, opts) {{
+            var el = _origCreateElement.call(this, tag, opts);
+            if (typeof tag === 'string' && tag.toLowerCase() === 'script') {{
+                var _srcVal = '';
+                try {{
+                    var origDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src')
+                                || Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'src');
+                    Object.defineProperty(el, 'src', {{
+                        configurable: true,
+                        enumerable: true,
+                        get: function() {{ return _srcVal; }},
+                        set: function(v) {{
+                            _srcVal = proxyUrl(String(v));
+                            try {{ if (origDesc && origDesc.set) origDesc.set.call(el, _srcVal); }} catch(e2) {{}}
+                        }}
+                    }});
+                }} catch(e) {{}}
+            }}
+            return el;
+        }};
+    }} catch(e) {{}}
     // Intercept non-proxied link clicks
     document.addEventListener('click', function(e) {{
         var a = e.target.closest('a');
@@ -4226,7 +4315,22 @@ async fn browser_proxy(
             .body(rewritten);
     }
 
-    // Pass through non-HTML/non-CSS resources directly
+    // Rewrite JavaScript files — intercept dynamic import() calls so they route through the proxy.
+    // Without this, a bundle like dist.xxx.js does import('/api.js') which resolves via <base href>
+    // to the REAL origin (bypassing the proxy) → SPA server returns HTML → MIME type error.
+    if content_type.contains("javascript") || content_type.contains("application/x-javascript") || content_type.contains("text/javascript") {
+        let js = match response.text().await {
+            Ok(t) => t,
+            Err(e) => return HttpResponse::BadGateway().body(format!("Read error: {}", e)),
+        };
+        let rewritten = rewrite_js_imports(&js, &final_url, &proxy_prefix);
+        return HttpResponse::build(ok_status)
+            .content_type(content_type)
+            .insert_header(("Access-Control-Allow-Origin", "*"))
+            .body(rewritten);
+    }
+
+    // Pass through non-HTML/non-CSS/non-JS resources directly
     if !content_type.contains("text/html") {
         let bytes = match response.bytes().await {
             Ok(b) => b,
