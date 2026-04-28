@@ -3454,22 +3454,33 @@ async fn execute_tool(
 
         "file_list" => {
             let user_dir = get_user_dir(username);
+            let subfolder = input.get("name").and_then(|n| n.as_str()).unwrap_or("").trim_matches('/');
+            let target_dir = if subfolder.is_empty() || subfolder.contains("..") {
+                user_dir.clone()
+            } else {
+                format!("{}/{}", user_dir, subfolder)
+            };
             std::fs::create_dir_all(&user_dir).ok();
-            match std::fs::read_dir(&user_dir) {
+            match std::fs::read_dir(&target_dir) {
                 Ok(entries) => {
+                    let prefix = if subfolder.is_empty() { String::new() } else { format!("{}/", subfolder) };
                     let files: Vec<String> = entries
                         .filter_map(|e| e.ok())
                         .filter(|e| !e.file_name().to_string_lossy().starts_with("._"))
                         .map(|e| {
                             let name = e.file_name().to_string_lossy().to_string();
-                            if e.path().is_dir() { format!("[folder] {}", name) }
-                            else { format!("[file] {} ({} bytes)", name, e.metadata().map(|m| m.len()).unwrap_or(0)) }
+                            if e.path().is_dir() { format!("[folder] {}{}", prefix, name) }
+                            else { format!("[file] {}{} ({} bytes)", prefix, name, e.metadata().map(|m| m.len()).unwrap_or(0)) }
                         })
                         .collect();
-                    if files.is_empty() { "No files found.".to_string() }
-                    else { format!("Files:\n{}", files.join("\n")) }
+                    if files.is_empty() {
+                        if subfolder.is_empty() { "No files found.".to_string() }
+                        else { format!("Folder '{}' is empty.", subfolder) }
+                    } else {
+                        format!("Files in '{}':\n{}", if subfolder.is_empty() { "root" } else { subfolder }, files.join("\n"))
+                    }
                 }
-                Err(e) => format!("Error: {}", e),
+                Err(_) => format!("Folder '{}' not found.", subfolder),
             }
         }
 
