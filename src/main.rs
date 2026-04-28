@@ -4403,6 +4403,10 @@ fn sse_event(data: &serde_json::Value) -> String {
     format!("data: {}\n\n", serde_json::to_string(data).unwrap_or_default())
 }
 
+fn sse_ping() -> String {
+    ": ping\n\n".to_string()
+}
+
 /// Agent endpoint - SSE streaming with native tool calling and ReAct fallback
 #[post("/api/agent")]
 async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>) -> HttpResponse {
@@ -4431,6 +4435,18 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
 
     let (tx, rx) = mpsc::channel::<String>(64);
     let state = app_data.clone();
+
+    // Spawn heartbeat task — sends SSE comment every 20s to keep the connection alive
+    // through proxies/browsers that close idle SSE streams.
+    let heartbeat_tx = tx.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            if heartbeat_tx.send(sse_ping()).await.is_err() {
+                break; // Main task finished and channel dropped
+            }
+        }
+    });
 
     // Spawn the agent loop in a background task
     tokio::spawn(async move {

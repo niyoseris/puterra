@@ -1773,6 +1773,19 @@
             <b>💡 Examples:</b> "What's the weather today?", "Create notes.txt", "Write fibonacci in Python"
         </div>`;
 
+        // Rebuild chat HTML from saved messages when conv.html is missing
+        function convHtml(conv) {
+            if (conv.html) return conv.html;
+            if (!conv.messages || conv.messages.length === 0) return WELCOME_HTML;
+            return WELCOME_HTML + conv.messages.map(m => {
+                if (m.role === 'user') {
+                    return `<div class="chat-message user">${escapeHtml(m.content)}</div>`;
+                } else {
+                    return `<div class="chat-message assistant">${markdownToHtml(m.content)}</div>`;
+                }
+            }).join('');
+        }
+
         async function loadConversations() {
             let fromServer = false;
             // Try server first (enables cross-device sync)
@@ -1903,7 +1916,7 @@
                 chatHistory = conv.messages ? [...conv.messages] : [];
                 const messagesDiv = document.getElementById('chatMessages');
                 if (messagesDiv) {
-                    messagesDiv.innerHTML = conv.html || WELCOME_HTML;
+                    messagesDiv.innerHTML = convHtml(conv);
                     messagesDiv.scrollTop = messagesDiv.scrollHeight;
                 }
             }
@@ -2335,7 +2348,7 @@
                             chatHistory = conv.messages ? [...conv.messages] : [];
                             const messagesDiv = document.getElementById('chatMessages');
                             if (messagesDiv) {
-                                messagesDiv.innerHTML = conv.html || WELCOME_HTML;
+                                messagesDiv.innerHTML = convHtml(conv);
                                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
                             }
                         }
@@ -2347,7 +2360,7 @@
                         chatHistory = conv.messages ? [...conv.messages] : [];
                         const messagesDiv = document.getElementById('chatMessages');
                         if (messagesDiv) {
-                            messagesDiv.innerHTML = conv.html || WELCOME_HTML;
+                            messagesDiv.innerHTML = convHtml(conv);
                             messagesDiv.scrollTop = messagesDiv.scrollHeight;
                         }
                         renderConversationList();
