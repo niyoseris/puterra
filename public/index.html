@@ -1925,7 +1925,7 @@
             // Enter confirm state
             btn.dataset.confirming = '1';
             const original = btn.innerHTML;
-            btn.innerHTML = '<span style="font-size:0.7rem;white-space:nowrap;color:#ef4444;">Sil?</span>';
+            btn.innerHTML = '<span style="font-size:0.7rem;white-space:nowrap;color:#ef4444;">Delete?</span>';
             btn.style.minWidth = '40px';
             btn._confirmTimer = setTimeout(() => {
                 btn.dataset.confirming = '';
@@ -2690,15 +2690,15 @@
                             <!-- Agent Preferences -->
                             <div>
                                 <h3 style="margin-bottom:10px;color:#a5b4fc;font-size:0.9rem;text-transform:uppercase;letter-spacing:1px;">
-                                    <i class="fas fa-sliders-h"></i> Agent Tercihleri
+                                    <i class="fas fa-sliders-h"></i> Agent Preferences
                                 </h3>
                                 <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:10px;">
                                     <div>
-                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Tercihlerim / Custom Instructions</label>
-                                        <div style="color:#6b7280;font-size:0.7rem;margin-bottom:6px;">Agent her mesajda bu tercihlere uyar. Dil, ton, format, kısıtlamalar yazabilirsin.</div>
+                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Custom Instructions</label>
+                                        <div style="color:#6b7280;font-size:0.7rem;margin-bottom:6px;">The agent will follow these preferences in every response. You can specify language, tone, format, and constraints.</div>
                                         <textarea id="set_custom_instructions" class="input-field" rows="5"
                                             style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.82rem;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);resize:vertical;font-family:inherit;line-height:1.5;box-sizing:border-box;"
-                                            placeholder="Örn:&#10;- Her zaman Türkçe yanıt ver&#10;- Kısa ve öz ol&#10;- Kodları yorumsuz yazma&#10;- Tablo yerine liste kullan"></textarea>
+                                            placeholder="Example:&#10;- Always respond in English&#10;- Keep responses concise&#10;- Write code without comments&#10;- Use lists instead of tables"></textarea>
                                     </div>
                                     <div>
                                         <label style="display:flex;align-items:center;gap:8px;font-size:0.75rem;color:#9ca3af;cursor:pointer;">
@@ -2887,10 +2887,10 @@
                     body: JSON.stringify({ custom_instructions: ci, system_prompt_override: override })
                 });
                 const data = await res.json();
-                if (data.success) showToast('Tercihler kaydedildi', 'success');
-                else showToast('Kayıt hatası', 'error');
+                if (data.success) showToast('Preferences saved!', 'success');
+                else showToast('Save failed', 'error');
             } catch (_) {
-                showToast('Bağlantı hatası', 'error');
+                showToast('Connection error', 'error');
             }
         }
 
@@ -2912,7 +2912,7 @@
                     });
                     const data = await res.json();
                     el.value = data.system_prompt || '';
-                } catch (_) { el.value = 'Yüklenemedi.'; }
+                } catch (_) { el.value = 'Failed to load'; }
             }
             el.style.display = 'block';
         }
@@ -2935,7 +2935,7 @@
                     });
                     const data = await res.json();
                     el.value = data.system_prompt || '';
-                } catch (_) { el.value = 'Yüklenemedi.'; }
+                } catch (_) { el.value = 'Failed to load'; }
             }
             el.style.display = 'block';
         }
