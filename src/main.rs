@@ -17,6 +17,8 @@ use regex::Regex;
 use ::image::DynamicImage;
 use resvg::usvg::{Options, Tree};
 use resvg::tiny_skia::Pixmap;
+use quick_xml::Reader;
+use quick_xml::events::Event;
 
 // ============================================================
 // TYPES
@@ -206,6 +208,33 @@ fn save_settings(settings: &Settings) {
     std::fs::write(SETTINGS_PATH, serde_json::to_string_pretty(settings).unwrap_or_default()).ok();
 }
 
+fn get_user_settings_path(username: &str) -> String {
+    format!("data/users/{}/settings.json", username)
+}
+
+fn load_user_settings(username: &str) -> Settings {
+    std::fs::read_to_string(get_user_settings_path(username))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_user_settings(username: &str, settings: &Settings) {
+    std::fs::create_dir_all(get_user_dir(username)).ok();
+    std::fs::write(
+        get_user_settings_path(username),
+        serde_json::to_string_pretty(settings).unwrap_or_default(),
+    ).ok();
+}
+
+fn extract_token_username(data: &web::Data<AppState>, req: &actix_web::HttpRequest) -> Option<String> {
+    req.headers()
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .and_then(|token| get_session_username(data, token))
+}
+
 #[derive(Clone)]
 struct Session {
     token: String,
@@ -379,6 +408,435 @@ fn html_to_text(html: &str) -> String {
     let text = re_spaces.replace_all(&text, " ");
 
     text.trim().to_string()
+}
+
+// ============================================================
+// DOCUMENT TEXT EXTRACTION
+// ============================================================
+
+#[derive(Debug)]
+enum DocumentType {
+    Pdf,
+    Docx,
+    Doc,
+    Pages,
+    Text,
+}
+
+fn detect_document_type(path: &str) -> DocumentType {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "pdf" => DocumentType::Pdf,
+        "docx" => DocumentType::Docx,
+        "doc" => DocumentType::Doc,
+        "pages" => DocumentType::Pages,
+        _ => DocumentType::Text,
+    }
+}
+
+/// Extract text from a PDF file's raw bytes
+fn extract_pdf_text(bytes: &[u8]) -> Result<String, String> {
+    pdf_extract::extract_text_from_mem(bytes)
+        .map_err(|e| format!("PDF extraction failed: {}", e))
+}
+
+/// Extract text from a DOCX file's raw bytes (ZIP containing word/document.xml)
+/// Falls back to .doc extraction if the file is not a valid ZIP (e.g. old .doc format)
+fn extract_docx_text(bytes: &[u8], file_path: &str) -> Result<String, String> {
+    let cursor = std::io::Cursor::new(bytes);
+    let archive = zip::ZipArchive::new(cursor);
+
+    let mut archive = match archive {
+        Ok(a) => a,
+        Err(_) => {
+            // Not a valid ZIP — might be an old .doc format saved with .docx extension
+            return extract_doc_text(file_path);
+        }
+    };
+
+    let mut xml_data = None;
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).map_err(|e| format!("ZIP read error: {}", e))?;
+        if file.name() == "word/document.xml" {
+            let mut content = String::new();
+            std::io::Read::read_to_string(&mut file, &mut content)
+                .map_err(|e| format!("Failed to read word/document.xml: {}", e))?;
+            xml_data = Some(content);
+            break;
+        }
+    }
+
+    let xml = xml_data.ok_or("Invalid DOCX: word/document.xml not found")?;
+    let mut reader = Reader::from_str(&xml);
+    reader.config_mut().trim_text(true);
+
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut in_text = false;
+    let mut buf = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                let local = e.local_name();
+                let local_str = String::from_utf8_lossy(local.as_ref());
+                if local_str == "t" { in_text = true; }
+            }
+            Ok(Event::End(e)) => {
+                let local = e.local_name();
+                let local_str = String::from_utf8_lossy(local.as_ref());
+                if local_str == "p" {
+                    text_parts.push("\n".to_string());
+                }
+                if local_str == "t" { in_text = false; }
+            }
+            Ok(Event::Text(e)) => {
+                if in_text {
+                    if let Ok(t) = e.unescape() {
+                        text_parts.push(t.to_string());
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("XML parse error: {}", e)),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    let text = text_parts.join("");
+    Ok(text.trim().to_string())
+}
+
+/// Extract text from a .pages file (iWork ZIP with Snappy-compressed protobuf)
+fn extract_pages_text(bytes: &[u8]) -> Result<String, String> {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor)
+        .map_err(|e| format!("Invalid Pages: not a ZIP archive: {}", e))?;
+
+    // Strategy 1: Look for QuickLook/Preview.pdf inside the ZIP
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).map_err(|e| format!("ZIP read error: {}", e))?;
+        if file.name() == "QuickLook/Preview.pdf" {
+            let mut pdf_bytes = Vec::new();
+            std::io::Read::read_to_end(&mut file, &mut pdf_bytes)
+                .map_err(|e| format!("Failed to read QuickLook/Preview.pdf: {}", e))?;
+            return extract_pdf_text(&pdf_bytes);
+        }
+    }
+
+    // Strategy 2: Extract text from Index/Document.iwa (Snappy-compressed protobuf)
+    let mut iwa_data = Vec::new();
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).map_err(|e| format!("ZIP read error: {}", e))?;
+        if file.name() == "Index/Document.iwa" {
+            std::io::Read::read_to_end(&mut file, &mut iwa_data)
+                .map_err(|e| format!("Failed to read Index/Document.iwa: {}", e))?;
+            break;
+        }
+    }
+
+    if iwa_data.is_empty() {
+        return Err("Invalid Pages: Index/Document.iwa not found".to_string());
+    }
+
+    // iwa format: [1 byte type] [3 byte little-endian length] [data]
+    // type 0 = Snappy-compressed, type 1 = raw
+    let mut all_text: Vec<String> = Vec::new();
+    let mut decoder = snap::raw::Decoder::new();
+
+    // Collect data from all iwa files in the ZIP
+    let iwa_names = ["Index/Document.iwa", "Index/DocumentStylesheet.iwa"];
+    for iwa_name in &iwa_names {
+        let mut iwa_data = Vec::new();
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i).map_err(|e| format!("ZIP read error: {}", e))?;
+            if file.name() == *iwa_name {
+                std::io::Read::read_to_end(&mut file, &mut iwa_data)
+                    .map_err(|e| format!("Failed to read {}: {}", iwa_name, e))?;
+                break;
+            }
+        }
+        if iwa_data.is_empty() { continue; }
+
+        // Parse iwa chunks: [1 byte type] [3 byte LE length] [data]
+        let mut pos = 0;
+        while pos + 4 <= iwa_data.len() {
+            let msg_type = iwa_data[pos];
+            let chunk_len = (iwa_data[pos + 1] as usize)
+                | ((iwa_data[pos + 2] as usize) << 8)
+                | ((iwa_data[pos + 3] as usize) << 16);
+
+            if chunk_len == 0 || pos + 4 + chunk_len > iwa_data.len() {
+                break;
+            }
+
+            let chunk_data = &iwa_data[pos + 4..pos + 4 + chunk_len];
+
+            // Try Snappy decompression (type 0), or use raw data (type 1)
+            let decompressed = if msg_type == 0 {
+                match decoder.decompress_vec(chunk_data) {
+                    Ok(d) => d,
+                    Err(_) => chunk_data.to_vec(),
+                }
+            } else {
+                chunk_data.to_vec()
+            };
+
+            // Extract text from the decompressed protobuf data
+            extract_iwa_text(&decompressed, &mut all_text);
+            pos += 4 + chunk_len;
+        }
+    }
+
+    if all_text.is_empty() {
+        return Err("No extractable text found in Pages file".to_string());
+    }
+
+    // Filter out locale/calendar metadata fragments that Apple embeds in iwa files
+    let locale_kws = [
+        "gregorian", "latn", "en_TR", "Anno Domini", "Before Christ",
+        "1st quarter", "2nd quarter", "3rd quarter", "4th quarter",
+        "iso-a", "Application/Blank", "Standard TOC", "HH:mm",
+    ];
+    let day_kws = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    let month_kws = ["January", "February", "March", "April", "May", "June",
+                     "July", "August", "September", "October", "November", "December"];
+    let date_fmt_kws = ["d.MM.y", "d MMM y", "d MMMM y", "EEEE", "HH:mm:ss", "zzzz", "zzz"];
+
+    let filtered: Vec<String> = all_text.into_iter().filter(|s| {
+        let lower = s.to_lowercase();
+        if locale_kws.iter().any(|kw| lower.contains(&kw.to_lowercase())) { return false; }
+        if day_kws.iter().any(|kw| s.starts_with(kw)) { return false; }
+        if month_kws.iter().any(|kw| s.starts_with(kw)) { return false; }
+        if date_fmt_kws.iter().any(|kw| s.contains(kw)) { return false; }
+        // Skip short currency/locale codes like "AUD  A", "F CFA"
+        if s.len() <= 8 && s.chars().filter(|c| c.is_uppercase()).count() >= 3 { return false; }
+        if s.len() < 3 { return false; }
+        true
+    }).collect();
+
+    if filtered.is_empty() {
+        return Err("No extractable text found in Pages file".to_string());
+    }
+
+    Ok(filtered.join("\n").trim().to_string())
+}
+
+/// Extract readable text from decompressed iwa protobuf data.
+/// Scans for protobuf length-delimited fields and checks if they contain
+/// human-readable text. Also does a strings-like scan as fallback.
+fn extract_iwa_text(data: &[u8], out: &mut Vec<String>) {
+    // Strategy 1: Parse as protobuf and extract string fields
+    extract_protobuf_text(data, out);
+
+    // Strategy 2: Strings-like scan for any readable UTF-8 sequences
+    // that might have been missed by the protobuf parser
+    let text = String::from_utf8_lossy(data);
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_alphanumeric() || ch.is_whitespace() || ".,!?;:'\"()-/".contains(ch) {
+            current.push(ch);
+        } else {
+            if current.len() >= 5 {
+                let trimmed = current.trim();
+                if is_likely_text(trimmed) && !out.iter().any(|e| e.contains(trimmed)) {
+                    out.push(trimmed.to_string());
+                }
+            }
+            current.clear();
+        }
+    }
+    if current.len() >= 5 {
+        let trimmed = current.trim();
+        if is_likely_text(trimmed) && !out.iter().any(|e| e.contains(trimmed)) {
+            out.push(trimmed.to_string());
+        }
+    }
+}
+
+/// Extract text-like strings from protobuf-encoded data
+fn extract_protobuf_text(data: &[u8], out: &mut Vec<String>) {
+    let mut pos = 0;
+    while pos < data.len() {
+        // Read varint field tag
+        let (tag, bytes_read) = match read_varint(data, pos) {
+            Some(v) => v,
+            None => break,
+        };
+        pos += bytes_read;
+
+        let wire_type = (tag & 0x07) as u8;
+        let _field_number = tag >> 3;
+
+        match wire_type {
+            // Varint (wire type 0)
+            0 => {
+                if let Some((_, n)) = read_varint(data, pos) {
+                    pos += n;
+                } else { break; }
+            }
+            // Length-delimited (wire type 2) — strings, bytes, embedded messages
+            2 => {
+                let (len, n) = match read_varint(data, pos) {
+                    Some(v) => v,
+                    None => break,
+                };
+                pos += n;
+                if pos + len as usize > data.len() { break; }
+                let payload = &data[pos..pos + len as usize];
+
+                // Check if this looks like human-readable text (UTF-8, min 2 chars,
+                // mostly printable, not just numbers/punctuation)
+                if let Ok(s) = std::str::from_utf8(payload) {
+                    let trimmed = s.trim();
+                    if trimmed.len() >= 2 && is_likely_text(trimmed) {
+                        out.push(trimmed.to_string());
+                    }
+                }
+
+                pos += len as usize;
+            }
+            // 32-bit fixed (wire type 5)
+            5 => { pos += 4; }
+            // 64-bit fixed (wire type 1)
+            1 => { pos += 8; }
+            // Start/end group (wire types 3, 4) — deprecated, skip
+            3 | 4 => {}
+            _ => break,
+        }
+    }
+}
+
+/// Read a varint from data at the given position, returning (value, bytes_read)
+fn read_varint(data: &[u8], start: usize) -> Option<(u64, usize)> {
+    let mut result: u64 = 0;
+    let mut shift: u32 = 0;
+    let mut pos = start;
+    loop {
+        if pos >= data.len() { return None; }
+        let byte = data[pos];
+        result |= ((byte & 0x7F) as u64) << shift;
+        pos += 1;
+        if byte & 0x80 == 0 { break; }
+        shift += 7;
+        if shift > 63 { return None; }
+    }
+    Some((result, pos - start))
+}
+
+/// Check if a string looks like human-readable text (not binary noise, UUIDs, or field names)
+fn is_likely_text(s: &str) -> bool {
+    if s.len() < 2 { return false; }
+    let printable: usize = s.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).count();
+    let alpha: usize = s.chars().filter(|c| c.is_alphabetic()).count();
+    // At least 50% printable, at least 30% alphabetic, not a UUID-like hex string
+    let ratio_printable = printable as f64 / s.len() as f64;
+    let ratio_alpha = alpha as f64 / s.len() as f64;
+    ratio_printable >= 0.5 && ratio_alpha >= 0.3 && !looks_like_hex_or_id(s)
+}
+
+/// Check if string looks like a UUID, hash, or internal identifier
+fn looks_like_hex_or_id(s: &str) -> bool {
+    // UUID pattern: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    let re = regex::Regex::new(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}").unwrap();
+    if re.is_match(s) { return true; }
+    // Pure hex string (long, no spaces)
+    if s.len() > 16 && s.chars().all(|c| c.is_ascii_hexdigit()) { return true; }
+    // Starts with underscore or is all-caps snake_case (internal identifiers)
+    if s.starts_with('_') && s.chars().filter(|c| *c == '_').count() > 3 { return true; }
+    false
+}
+
+/// Extract text from a .doc file using macOS textutil
+/// Extract text from a .doc file using available system tools.
+/// Tries: libreoffice (Linux/macOS) → textutil (macOS) → antiword (Linux)
+fn extract_doc_text(file_path: &str) -> Result<String, String> {
+    // Strategy 1: LibreOffice (available on most Linux servers)
+    let tmp_dir = std::env::temp_dir().join("puterra_doc_convert");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let lo_output = Command::new("libreoffice")
+        .args(&["--headless", "--convert-to", "txt:Text", "--outdir", tmp_dir.to_str().unwrap_or("/tmp"), file_path])
+        .output();
+
+    if let Ok(out) = lo_output {
+        if out.status.success() {
+            // LibreOffice writes to tmp_dir with the same filename but .txt extension
+            let txt_path = tmp_dir.join(std::path::Path::new(file_path)
+                .file_stem().unwrap_or_default().to_str().unwrap_or("doc")
+            ).with_extension("txt");
+            if let Ok(content) = std::fs::read_to_string(&txt_path) {
+                let _ = std::fs::remove_file(&txt_path);
+                if !content.trim().is_empty() {
+                    return Ok(content.trim().to_string());
+                }
+            }
+        }
+    }
+
+    // Strategy 2: textutil (macOS built-in)
+    let tu_output = Command::new("textutil")
+        .args(&["-convert", "txt", "-stdout", file_path])
+        .output();
+
+    if let Ok(out) = tu_output {
+        if out.status.success() {
+            if let Ok(s) = String::from_utf8(out.stdout) {
+                if !s.trim().is_empty() {
+                    return Ok(s.trim().to_string());
+                }
+            }
+        }
+    }
+
+    // Strategy 3: antiword (lightweight Linux .doc reader)
+    let aw_output = Command::new("antiword")
+        .arg(file_path)
+        .output();
+
+    if let Ok(out) = aw_output {
+        if out.status.success() {
+            if let Ok(s) = String::from_utf8(out.stdout) {
+                if !s.trim().is_empty() {
+                    return Ok(s.trim().to_string());
+                }
+            }
+        }
+    }
+
+    Err("Cannot extract .doc text: none of libreoffice, textutil, or antiword are available. Install libreoffice for best support.".to_string())
+}
+
+/// Extract text from any supported document type
+fn extract_document_text(file_path: &str) -> Result<String, String> {
+    let doc_type = detect_document_type(file_path);
+    match doc_type {
+        DocumentType::Pdf => {
+            let bytes = std::fs::read(file_path)
+                .map_err(|e| format!("Cannot read file: {}", e))?;
+            extract_pdf_text(&bytes)
+        }
+        DocumentType::Docx => {
+            let bytes = std::fs::read(file_path)
+                .map_err(|e| format!("Cannot read file: {}", e))?;
+            extract_docx_text(&bytes, file_path)
+        }
+        DocumentType::Pages => {
+            let bytes = std::fs::read(file_path)
+                .map_err(|e| format!("Cannot read file: {}", e))?;
+            extract_pages_text(&bytes)
+        }
+        DocumentType::Doc => {
+            extract_doc_text(file_path)
+        }
+        DocumentType::Text => {
+            std::fs::read_to_string(file_path)
+                .map_err(|e| format!("Cannot read file: {}", e))
+        }
+    }
 }
 
 /// Load an image from a local path or URL
@@ -816,6 +1274,163 @@ fn generate_pdf(title: &str, content: &str, output_path: &str) -> Result<String,
         file_size,
         ((lines.len() as f32 / 50.0).ceil() as usize).max(1)
     ))
+}
+
+/// Generate a DOCX (Word) document from title and text content
+fn generate_docx(title: &str, content: &str, output_path: &str) -> Result<String, String> {
+    use std::io::Write;
+
+    let file = std::fs::File::create(output_path)
+        .map_err(|e| format!("Cannot create DOCX file: {}", e))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    // [Content_Types].xml
+    zip.start_file("[Content_Types].xml", options)
+        .map_err(|e| format!("ZIP error: {}", e))?;
+    write!(zip, r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>"#).map_err(|e| format!("Write error: {}", e))?;
+
+    // _rels/.rels
+    zip.start_file("_rels/.rels", options)
+        .map_err(|e| format!("ZIP error: {}", e))?;
+    write!(zip, r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#).map_err(|e| format!("Write error: {}", e))?;
+
+    // word/_rels/document.xml.rels
+    zip.start_file("word/_rels/document.xml.rels", options)
+        .map_err(|e| format!("ZIP error: {}", e))?;
+    write!(zip, r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>"#).map_err(|e| format!("Write error: {}", e))?;
+
+    // word/styles.xml
+    zip.start_file("word/styles.xml", options)
+        .map_err(|e| format!("ZIP error: {}", e))?;
+    write!(zip, r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Title">
+    <w:name w:val="Title"/>
+    <w:rPr><w:b/><w:sz w:val="56"/></w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Heading1">
+    <w:name w:val="heading 1"/>
+    <w:rPr><w:b/><w:sz w:val="32"/></w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Heading2">
+    <w:name w:val="heading 2"/>
+    <w:rPr><w:b/><w:sz w:val="28"/></w:rPr>
+  </w:style>
+</w:styles>"#).map_err(|e| format!("Write error: {}", e))?;
+
+    // word/document.xml — build from content
+    let mut doc = String::from(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>"#);
+
+    // Title as first paragraph
+    doc.push_str(&format!(
+        "<w:p><w:pPr><w:pStyle w:val=\"Title\"/></w:pPr><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p>",
+        xml_escape(title)
+    ));
+
+    // Parse content line by line (similar to generate_pdf)
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            // Empty paragraph for spacing
+            doc.push_str("<w:p/>");
+        } else if trimmed.starts_with("### ") {
+            let text = xml_escape(&trimmed[4..]);
+            doc.push_str(&format!("<w:p><w:pPr><w:pStyle w:val=\"Heading2\"/></w:pPr><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p>", text));
+        } else if trimmed.starts_with("## ") {
+            let text = xml_escape(&trimmed[3..]);
+            doc.push_str(&format!("<w:p><w:pPr><w:pStyle w:val=\"Heading2\"/></w:pPr><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p>", text));
+        } else if trimmed.starts_with("# ") {
+            let text = xml_escape(&trimmed[2..]);
+            doc.push_str(&format!("<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p>", text));
+        } else if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+            // Bullet list item
+            let text = xml_escape(&trimmed[2..]);
+            doc.push_str(&format!("<w:p><w:pPr><w:ind w:left=\"720\"/></w:pPr><w:r><w:t xml:space=\"preserve\">\u{2022} {}</w:t></w:r></w:p>", text));
+        } else {
+            // Regular paragraph with **bold** support
+            doc.push_str("<w:p>");
+            doc.push_str(&format_inline_runs(trimmed));
+            doc.push_str("</w:p>");
+        }
+    }
+
+    doc.push_str("</w:body></w:document>");
+
+    zip.start_file("word/document.xml", options)
+        .map_err(|e| format!("ZIP error: {}", e))?;
+    zip.write_all(doc.as_bytes())
+        .map_err(|e| format!("Write error: {}", e))?;
+
+    zip.finish().map_err(|e| format!("ZIP finish error: {}", e))?;
+
+    let file_size = std::fs::metadata(output_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    Ok(format!("DOCX created: '{}' ({} bytes)",
+        output_path.rsplit('/').next().unwrap_or(output_path),
+        file_size
+    ))
+}
+
+/// Escape special XML characters
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+     .replace('<', "&lt;")
+     .replace('>', "&gt;")
+     .replace('"', "&quot;")
+     .replace('\'', "&apos;")
+}
+
+/// Format a line with **bold** inline markup into DOCX XML runs
+fn format_inline_runs(line: &str) -> String {
+    let mut runs = String::new();
+    let mut current = String::new();
+    let mut in_bold = false;
+    let mut chars = line.chars().peekable();
+
+    let flush = |buf: &String, bold: bool| -> String {
+        if buf.is_empty() { return String::new(); }
+        if bold {
+            format!("<w:r><w:rPr><w:b/></w:rPr><w:t xml:space=\"preserve\">{}</w:t></w:r>", xml_escape(buf))
+        } else {
+            format!("<w:r><w:t xml:space=\"preserve\">{}</w:t></w:r>", xml_escape(buf))
+        }
+    };
+
+    while let Some(ch) = chars.next() {
+        if ch == '*' && chars.peek() == Some(&'*') {
+            chars.next(); // consume second *
+            runs.push_str(&flush(&current, in_bold));
+            current.clear();
+            in_bold = !in_bold;
+        } else {
+            current.push(ch);
+        }
+    }
+    runs.push_str(&flush(&current, in_bold));
+
+    if runs.is_empty() {
+        format!("<w:r><w:t xml:space=\"preserve\">{}</w:t></w:r>", xml_escape(line))
+    } else {
+        runs
+    }
 }
 
 /// Web search - dispatches to Ollama Cloud or DuckDuckGo based on settings
@@ -1675,9 +2290,12 @@ async fn read_file(body: web::Json<ReadRequest>) -> impl Responder {
         return HttpResponse::BadRequest().json(serde_json::json!({ "success": false, "error": "Invalid name" }));
     }
     let path = format!("{}/{}", get_user_dir(&body.username), body.name);
-    match std::fs::read_to_string(&path) {
-        Ok(content) => HttpResponse::Ok().json(serde_json::json!({ "success": true, "content": content })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "success": false, "error": e.to_string() }))
+    match extract_document_text(&path) {
+        Ok(content) => {
+            let is_extracted = !matches!(detect_document_type(&path), DocumentType::Text);
+            HttpResponse::Ok().json(serde_json::json!({ "success": true, "content": content, "is_extracted": is_extracted }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "success": false, "error": e }))
     }
 }
 
@@ -2064,6 +2682,7 @@ Rules:
 - Be helpful and detailed
 - If run_python fails due to a missing library, tell the user which library is needed and ASK if they want you to install it. If they agree, install it with shell_exec (pip install <library>). Do NOT keep retrying with workarounds.
 - To create PDF files, ALWAYS use the create_pdf tool. NEVER use Python/reportlab/fpdf for PDFs. The create_pdf tool is built-in, reliable, and supports markdown.
+- To create Word (DOCX) files, ALWAYS use the create_docx tool. It supports markdown-style formatting (# headings, **bold**, bullet lists) and produces editable .docx files.
 
 ## File Storage — CRITICAL RULES
 ALL files you create MUST end up in the user's cloud storage so they can download them.
@@ -2079,6 +2698,7 @@ ALL files you create MUST end up in the user's cloud storage so they can downloa
 
 **For shell_exec:** shell runs in /tmp by default. If you must create files with shell_exec, pipe output through run_python instead, or explicitly use the user storage path returned by checking `shell_exec(command="pwd")` first.
 - The create_pdf tool supports images: ![alt](path). Use image_search to find reliable image URLs before creating PDFs.
+- The create_docx tool creates editable Word documents. Use it when the user asks for .docx files or says "save as Word".
 - For PDFs with images: FIRST use image_search to find working image URLs, THEN create the PDF. This avoids broken images from blocked URLs.
 - image_search tool: Use this to find direct image URLs for maps, diagrams, photos, etc. It returns URLs you can use directly in create_pdf.
 - When user says "bunu PDF olarak kaydet" or "save as PDF", use the content from your PREVIOUS answer in this conversation. Do NOT search again.
@@ -2461,6 +3081,22 @@ fn build_tool_definitions(username: &str) -> Vec<serde_json::Value> {
         serde_json::json!({
             "type": "function",
             "function": {
+                "name": "create_docx",
+                "description": "Create a Word (DOCX) document and save it to the user's cloud storage. Supports markdown-style formatting (# headings, **bold**, bullet lists). Perfect for editable documents, reports, and assignments.",
+                "parameters": {
+                    "type": "object",
+                    "required": ["filename", "title", "content"],
+                    "properties": {
+                        "filename": {"type": "string", "description": "Output filename (e.g. 'report.docx')"},
+                        "title": {"type": "string", "description": "Document title shown at the top"},
+                        "content": {"type": "string", "description": "Document content as plain text or simple markdown. Use # for headings, ## for subheadings, **text** for bold, - for bullet points."}
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
                 "name": "image_download",
                 "description": "Download an image from a URL and save it to the user's cloud storage. Use this after image_search to save images to a folder.",
                 "parameters": {
@@ -2797,9 +3433,18 @@ async fn execute_tool(
             if name.is_empty() || name.contains("..") {
                 return "Error: valid file name is required".to_string();
             }
-            match std::fs::read_to_string(format!("{}/{}", get_user_dir(username), name)) {
+            let path = format!("{}/{}", get_user_dir(username), name);
+            match extract_document_text(&path) {
                 Ok(content) if content.is_empty() => format!("File '{}' is empty.", name),
-                Ok(content) => format!("Content of '{}':\n{}", name, safe_truncate(&content, 5000)),
+                Ok(content) => {
+                    let doc_type = detect_document_type(&path);
+                    let prefix = if !matches!(doc_type, DocumentType::Text) {
+                        format!("[Extracted text from {}] ", format!("{:?}", doc_type).to_lowercase())
+                    } else {
+                        String::new()
+                    };
+                    format!("Content of '{}':\n{}{}", name, prefix, safe_truncate(&content, 5000))
+                }
                 Err(e) => format!("Error reading '{}': {}", name, e),
             }
         }
@@ -2821,6 +3466,19 @@ async fn execute_tool(
                 return match generate_pdf(title, content, &output_path) {
                     Ok(msg) => msg,
                     Err(e) => format!("PDF creation failed: {}", e),
+                };
+            }
+            // Redirect .docx writes to the DOCX generator
+            if name.to_lowercase().ends_with(".docx") {
+                let title = name.trim_end_matches(".docx").trim_end_matches(".DOCX").replace('_', " ");
+                let user_dir = get_user_dir(username);
+                let output_path = format!("{}/{}", user_dir, name);
+                if let Some(parent) = std::path::Path::new(&output_path).parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                return match generate_docx(&title, content, &output_path) {
+                    Ok(msg) => msg,
+                    Err(e) => format!("DOCX creation failed: {}", e),
                 };
             }
             let user_dir = get_user_dir(username);
@@ -3039,6 +3697,26 @@ async fn execute_tool(
             match generate_pdf(title, content, &output_path) {
                 Ok(msg) => msg,
                 Err(e) => format!("PDF creation failed: {}", e),
+            }
+        }
+
+        "create_docx" => {
+            let filename = input.get("filename").and_then(|f| f.as_str()).unwrap_or("document.docx");
+            let title = input.get("title").and_then(|t| t.as_str()).unwrap_or("Document");
+            let content = input.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            if content.is_empty() { return "Error: content is required".to_string(); }
+            if filename.contains("..") {
+                return "Error: invalid filename (path traversal not allowed)".to_string();
+            }
+            let filename = if !filename.ends_with(".docx") { format!("{}.docx", filename) } else { filename.to_string() };
+            let user_dir = get_user_dir(username);
+            let output_path = format!("{}/{}", user_dir, filename);
+            if let Some(parent) = std::path::Path::new(&output_path).parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            match generate_docx(title, content, &output_path) {
+                Ok(msg) => msg,
+                Err(e) => format!("DOCX creation failed: {}", e),
             }
         }
 
@@ -3398,7 +4076,9 @@ You have access to powerful tools. You MUST use tools when you need real-time in
     Input: {{"code": "console.log('hello')"}}
 14. **create_pdf** - Create a PDF document and save to user's storage
     Input: {{"filename": "report.pdf", "title": "My Report", "content": "Heading\n\nBody text here..."}}
-15. **zip_create** - Create a ZIP archive from a file or folder
+15. **create_docx** - Create a Word (DOCX) document and save to user's storage
+    Input: {{"filename": "report.docx", "title": "My Report", "content": "Heading\n\nBody text here..."}}
+16. **zip_create** - Create a ZIP archive from a file or folder
     Input: {{"source": "travel/", "output": "travel_backup.zip"}}
 16. **unzip** - Extract a ZIP archive
     Input: {{"archive": "files.zip", "destination": "extracted/"}}
@@ -3426,6 +4106,7 @@ Final Answer: [your complete answer with markdown formatting]
 - Respond in the SAME LANGUAGE as the user message
 - NEVER say you do not have access to real-time data - USE the tools!
 - To create PDF files, ALWAYS use the create_pdf tool. Do NOT use Python for PDF creation.
+- To create Word (DOCX) files, ALWAYS use the create_docx tool.
 - After receiving an Observation, you MUST either use another tool OR give a Final Answer
 
 ## Task Persistence (REQUIRED for multi-step tasks)
@@ -4517,6 +5198,7 @@ async fn tools_list() -> impl Responder {
             {"name": "file_create", "description": "Create file or folder"},
             {"name": "file_delete", "description": "Delete file or folder"},
             {"name": "create_pdf", "description": "Create PDF documents (built-in Rust, no external deps)"},
+            {"name": "create_docx", "description": "Create Word (DOCX) documents (built-in Rust)"},
             {"name": "zip_create", "description": "Create ZIP archive from file or folder"},
             {"name": "unzip", "description": "Extract ZIP archive"},
             {"name": "cron_create", "description": "Schedule a recurring shell command"},
@@ -4861,8 +5543,10 @@ async fn validate_share_key(data: web::Data<AppState>, path: web::Path<String>) 
 
 /// Get settings
 #[get("/api/settings")]
-async fn get_settings() -> impl Responder {
-    let settings = current_settings();
+async fn get_settings(data: web::Data<AppState>, req: actix_web::HttpRequest) -> impl Responder {
+    let username = extract_token_username(&data, &req)
+        .unwrap_or_else(|| "guest".to_string());
+    let settings = load_user_settings(&username);
 
     // Mask local API key
     let masked_key_local = if settings.llm_api_key_local.is_empty() {
@@ -4918,8 +5602,10 @@ async fn get_settings() -> impl Responder {
 
 /// Update settings
 #[post("/api/settings")]
-async fn update_settings(data: web::Data<AppState>, body: web::Json<serde_json::Value>) -> impl Responder {
-    let mut settings = data.settings.lock().unwrap();
+async fn update_settings(data: web::Data<AppState>, req: actix_web::HttpRequest, body: web::Json<serde_json::Value>) -> impl Responder {
+    let username = extract_token_username(&data, &req)
+        .unwrap_or_else(|| "guest".to_string());
+    let mut settings = load_user_settings(&username);
 
     // Local Ollama configuration
     if let Some(v) = body.get("llm_api_url_local").and_then(|v| v.as_str()) {
@@ -4972,17 +5658,6 @@ async fn update_settings(data: web::Data<AppState>, body: web::Json<serde_json::
     if let Some(v) = body.get("shell_enabled").and_then(|v| v.as_bool()) {
         settings.shell_enabled = v;
     }
-    if let Some(v) = body.get("admin_password").and_then(|v| v.as_str()) {
-        if !v.is_empty() && v.len() >= 6 {
-            settings.admin_password = v.to_string();
-            let mut users = data.users.lock().unwrap();
-            if let Some(admin) = users.get_mut("admin") {
-                admin.password_hash = hash_password(v);
-            }
-            save_users(&users);
-        }
-    }
-
     // Timeouts
     if let Some(v) = body.get("timeout_agent").and_then(|v| v.as_u64()) {
         settings.timeout_agent = v.clamp(10, 600);
@@ -5017,7 +5692,24 @@ async fn update_settings(data: web::Data<AppState>, body: web::Json<serde_json::
         settings.chat_context_limit = (v as usize).clamp(1, 50);
     }
 
-    save_settings(&settings);
+    save_user_settings(&username, &settings);
+
+    // Admin password change: update global settings file + in-memory state + users table
+    if let Some(v) = body.get("admin_password").and_then(|v| v.as_str()) {
+        if !v.is_empty() && v.len() >= 6 {
+            let mut global = current_settings();
+            global.admin_password = v.to_string();
+            save_settings(&global);
+            let mut mem = data.settings.lock().unwrap();
+            mem.admin_password = v.to_string();
+            drop(mem);
+            let mut users = data.users.lock().unwrap();
+            if let Some(admin) = users.get_mut("admin") {
+                admin.password_hash = hash_password(v);
+            }
+            save_users(&users);
+        }
+    }
 
     HttpResponse::Ok().json(serde_json::json!({ "success": true, "message": "Settings saved" }))
 }
@@ -5167,6 +5859,36 @@ fn start_cron_runner() {
     });
 }
 
+/// Return saved conversations for the authenticated user
+#[get("/api/conversations")]
+async fn get_conversations(data: web::Data<AppState>, req: actix_web::HttpRequest) -> impl Responder {
+    let username = extract_token_username(&data, &req)
+        .unwrap_or_else(|| "guest".to_string());
+    let path = format!("data/users/{}/conversations.json", username);
+    let conversations: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!([]));
+    HttpResponse::Ok().json(serde_json::json!({ "success": true, "conversations": conversations }))
+}
+
+/// Save conversations for the authenticated user
+#[post("/api/conversations")]
+async fn save_conversations_endpoint(data: web::Data<AppState>, req: actix_web::HttpRequest, body: web::Json<serde_json::Value>) -> impl Responder {
+    let username = extract_token_username(&data, &req)
+        .unwrap_or_else(|| "guest".to_string());
+    let user_dir = get_user_dir(&username);
+    std::fs::create_dir_all(&user_dir).ok();
+    let conversations = body.get("conversations").cloned().unwrap_or(serde_json::json!([]));
+    let path = format!("{}/conversations.json", user_dir);
+    match std::fs::write(&path, serde_json::to_string(&conversations).unwrap_or_default()) {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "success": true })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false, "error": e.to_string()
+        })),
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
@@ -5241,6 +5963,8 @@ async fn main() -> std::io::Result<()> {
             .service(save_custom_tool)
             .service(get_settings)
             .service(update_settings)
+            .service(get_conversations)
+            .service(save_conversations_endpoint)
             .service(test_llm)
             .service(tools_list)
             .service(health)

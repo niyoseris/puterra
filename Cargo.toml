@@ -25,3 +25,6 @@ resvg = "0.44"
 tokio-stream = "0.1"
 zip = { version = "2", features = ["deflate"] }
 cron = "0.12"
+pdf-extract = "0.10"
+quick-xml = "0.37"
+snap = "1"
