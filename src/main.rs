@@ -5938,6 +5938,8 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(app_state.clone())
+            .app_data(actix_web::web::PayloadConfig::default()
+                .limit(52 * 1024 * 1024)) // 52 MB limit for multipart uploads
             .service(index)
             .service(signup)
             .service(login)

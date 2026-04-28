@@ -1657,6 +1657,7 @@
         </div>`;
 
         async function loadConversations() {
+            let fromServer = false;
             // Try server first (enables cross-device sync)
             const token = localStorage.getItem('auth_token');
             if (token) {
@@ -1668,39 +1669,50 @@
                         const data = await res.json();
                         if (data.success && Array.isArray(data.conversations) && data.conversations.length > 0) {
                             conversations = data.conversations;
+                            fromServer = true;
                             localStorage.setItem('puterra_conversations', JSON.stringify(conversations));
                             renderConversationList();
-                            return;
                         }
                     }
                 } catch (_) {}
             }
-            // Fall back to localStorage
-            try {
-                const saved = localStorage.getItem('puterra_conversations');
-                conversations = saved ? JSON.parse(saved) : [];
-            } catch (e) {
-                conversations = [];
+            // Fall back to localStorage if nothing from server
+            if (!fromServer) {
+                try {
+                    const saved = localStorage.getItem('puterra_conversations');
+                    conversations = saved ? JSON.parse(saved) : [];
+                } catch (e) {
+                    conversations = [];
+                }
+                // Migrate old single-chat format
+                if (conversations.length === 0) {
+                    const oldHistory = localStorage.getItem('puterra_chat_history');
+                    const oldHtml = localStorage.getItem('puterra_chat_html');
+                    if (oldHistory || oldHtml) {
+                        const conv = {
+                            id: Date.now().toString(),
+                            title: 'Previous Chat',
+                            messages: oldHistory ? JSON.parse(oldHistory) : [],
+                            html: oldHtml || WELCOME_HTML,
+                            created: Date.now()
+                        };
+                        conversations.push(conv);
+                        saveConversations();
+                        localStorage.removeItem('puterra_chat_history');
+                        localStorage.removeItem('puterra_chat_html');
+                    }
+                }
+                renderConversationList();
             }
-            // Migrate old single-chat format
-            if (conversations.length === 0) {
-                const oldHistory = localStorage.getItem('puterra_chat_history');
-                const oldHtml = localStorage.getItem('puterra_chat_html');
-                if (oldHistory || oldHtml) {
-                    const conv = {
-                        id: Date.now().toString(),
-                        title: 'Previous Chat',
-                        messages: oldHistory ? JSON.parse(oldHistory) : [],
-                        html: oldHtml || WELCOME_HTML,
-                        created: Date.now()
-                    };
-                    conversations.push(conv);
-                    saveConversations();
-                    localStorage.removeItem('puterra_chat_history');
-                    localStorage.removeItem('puterra_chat_html');
+            // Restore active conversation ID if not already set
+            if (!activeConversationId && conversations.length > 0) {
+                const saved = localStorage.getItem('puterra_active_conversation');
+                if (saved && conversations.find(c => c.id === saved)) {
+                    activeConversationId = saved;
+                } else {
+                    activeConversationId = conversations[0].id;
                 }
             }
-            renderConversationList();
         }
 
         function saveConversations() {
@@ -5457,7 +5469,13 @@ sys.stderr = io.StringIO()
             document.getElementById('newPassword').addEventListener('keypress', (e) => {
                 if (e.key === 'Enter') signup();
             });
-            
+
+            // Cache-bust background image by adding timestamp to URL
+            const bgTimestamp = Math.floor(Date.now() / 1000); // Cache refresh every second (update every reload)
+            const bgStyle = document.createElement('style');
+            bgStyle.textContent = `.desktop-bg { background-image: url('/static/Cyprus.png?v=${bgTimestamp}'); }`;
+            document.head.appendChild(bgStyle);
+
             // Check for saved session, require login if none
             checkSession();
             // Pre-load settings for model name etc.
