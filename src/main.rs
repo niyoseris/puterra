@@ -2691,7 +2691,7 @@ async fn memory(body: web::Json<MemoryRequest>) -> impl Responder {
 #[post("/api/chat")]
 async fn chat(body: web::Json<ChatRequest>) -> impl Responder {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(current_settings().timeout_agent))
+        .connect_timeout(std::time::Duration::from_secs(30))
         .build()
         .unwrap_or_default();
 
@@ -4452,8 +4452,11 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
         let tool_defs = build_tool_definitions(&username);
         let settings = current_settings();
         let max_iterations = settings.max_agent_iterations;
+        // No total timeout on agent client — LLM responses can take arbitrarily long.
+        // Web/search tools override timeout at the request level anyway.
+        // Only set connect_timeout to fail fast if the server is unreachable.
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(settings.timeout_agent))
+            .connect_timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_default();
         let mut step_num: usize = 0;
