@@ -2855,23 +2855,26 @@
                     continue;
                 }
 
+                // Helper to process inline markdown
+                const processInline = (text) => text
+                    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                    .replace(/__(.*?)__/g, '<strong>$1</strong>')
+                    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+                    .replace(/_(.*?)_/g, '<em>$1</em>');
+
                 // Headers
                 if (line.startsWith('### ')) {
-                    result.push('<h4 style="margin:10px 0 4px;font-weight:600;">' + line.slice(4) + '</h4>');
+                    result.push('<h4 style="margin:10px 0 4px;font-weight:600;">' + processInline(line.slice(4)) + '</h4>');
                 } else if (line.startsWith('## ')) {
-                    result.push('<h3 style="margin:12px 0 6px;font-weight:600;">' + line.slice(3) + '</h3>');
+                    result.push('<h3 style="margin:12px 0 6px;font-weight:600;">' + processInline(line.slice(3)) + '</h3>');
                 } else if (line.startsWith('# ')) {
-                    result.push('<h2 style="margin:14px 0 8px;font-weight:600;font-size:1.1em;">' + line.slice(2) + '</h2>');
+                    result.push('<h2 style="margin:14px 0 8px;font-weight:600;font-size:1.1em;">' + processInline(line.slice(2)) + '</h2>');
                 } else if (line === '---') {
                     result.push('<hr style="border:none;border-top:1px solid rgba(255,255,255,0.2);margin:12px 0;">');
                 } else if (line.startsWith('- ')) {
-                    result.push('<div style="margin-left:12px;">• ' + line.slice(2) + '</div>');
-                } else {
-                    // Process inline markdown
-                    let processedLine = line
-                        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                        .replace(/\*(.*?)\*/g, '<em>$1</em>');
-                    result.push(processedLine);
+                    result.push('<div style="margin-left:12px;">• ' + processInline(line.slice(2)) + '</div>');
+                } else if (line.trim() !== '') {
+                    result.push(processInline(line));
                 }
 
                 i++;
