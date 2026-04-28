@@ -2809,12 +2809,52 @@
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;')
                 .replace(/'/g, '&#039;');
-            
-            // Split by lines
+
             const lines = html.split('\n');
             let result = [];
-            
-            for (let line of lines) {
+            let i = 0;
+
+            while (i < lines.length) {
+                const line = lines[i];
+
+                // Detect markdown table (line contains | separators)
+                if (line.includes('|') && i + 1 < lines.length && lines[i + 1].includes('|') && lines[i + 1].includes('-')) {
+                    const headerLine = line;
+                    const separatorLine = lines[i + 1];
+                    const headers = headerLine.split('|').map(h => h.trim()).filter(h => h);
+
+                    // Find all table rows
+                    let tableRows = [];
+                    let j = i + 2;
+                    while (j < lines.length && lines[j].includes('|')) {
+                        const rowData = lines[j].split('|').map(c => c.trim()).filter(c => c);
+                        if (rowData.length > 0) tableRows.push(rowData);
+                        j++;
+                    }
+
+                    // Build HTML table
+                    let tableHtml = '<table style="border-collapse:collapse;width:100%;margin:12px 0;border:1px solid rgba(255,255,255,0.2);">';
+                    tableHtml += '<thead><tr style="background:rgba(99,102,241,0.15);">';
+                    for (const h of headers) {
+                        tableHtml += `<th style="border:1px solid rgba(255,255,255,0.15);padding:10px;text-align:left;font-weight:600;color:#a5b4fc;">${h}</th>`;
+                    }
+                    tableHtml += '</tr></thead><tbody>';
+
+                    for (const row of tableRows) {
+                        tableHtml += '<tr style="border:1px solid rgba(255,255,255,0.15);">';
+                        for (let k = 0; k < headers.length; k++) {
+                            const cell = row[k] || '';
+                            tableHtml += `<td style="border:1px solid rgba(255,255,255,0.15);padding:10px;color:#e5e7eb;">${cell}</td>`;
+                        }
+                        tableHtml += '</tr>';
+                    }
+
+                    tableHtml += '</tbody></table>';
+                    result.push(tableHtml);
+                    i = j;
+                    continue;
+                }
+
                 // Headers
                 if (line.startsWith('### ')) {
                     result.push('<h4 style="margin:10px 0 4px;font-weight:600;">' + line.slice(4) + '</h4>');
@@ -2828,13 +2868,15 @@
                     result.push('<div style="margin-left:12px;">• ' + line.slice(2) + '</div>');
                 } else {
                     // Process inline markdown
-                    line = line
+                    let processedLine = line
                         .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
                         .replace(/\*(.*?)\*/g, '<em>$1</em>');
-                    result.push(line);
+                    result.push(processedLine);
                 }
+
+                i++;
             }
-            
+
             return result.join('<br>');
         }
         
