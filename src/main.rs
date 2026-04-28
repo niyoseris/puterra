@@ -1969,6 +1969,167 @@ async fn do_direct_web_fetch(client: &reqwest::Client, url: &str) -> Result<Stri
     }
 }
 
+/// Streaming LLM call that handles both tool-calling and final-answer paths.
+///
+/// - If the LLM returns tool calls → returns them in the same JSON format as call_llm_chat
+///   (no SSE answer_chunk events emitted)
+/// - If the LLM returns content (no tool calls) → streams answer_chunk events token-by-token
+///   AND returns the assembled response JSON
+async fn call_llm_chat_streaming(
+    client: &reqwest::Client,
+    messages: &[serde_json::Value],
+    tools: Option<&[serde_json::Value]>,
+    model: Option<&str>,
+    share_key: Option<&ShareKey>,
+    tx: &tokio::sync::mpsc::Sender<String>,
+) -> Result<serde_json::Value, String> {
+    use futures::StreamExt;
+
+    let settings = current_settings();
+    let (api_url, llm_model, api_key): (String, String, String) = if let Some(sk) = share_key {
+        (sk.api_url.clone(), model.unwrap_or(&sk.model).to_string(), sk.api_key.clone())
+    } else {
+        match settings.llm_active_source.as_str() {
+            "cloud" => (settings.llm_api_url_cloud.clone(), model.unwrap_or(&settings.llm_model_cloud).to_string(), settings.llm_api_key_cloud.clone()),
+            _ => (settings.llm_api_url_local.clone(), model.unwrap_or(&settings.llm_model_local).to_string(), settings.llm_api_key_local.clone()),
+        }
+    };
+
+    let base = api_url.trim_end_matches('/');
+    let chat_url = if base.ends_with("/chat") || base.ends_with("/chat/completions") {
+        base.to_string()
+    } else if settings.llm_provider == "openai" && !base.contains("ollama.com") {
+        format!("{}/chat/completions", base)
+    } else {
+        format!("{}/chat", base)
+    };
+
+    let is_openai_compat = chat_url.ends_with("/chat/completions");
+    let is_cloud = share_key.map(|sk| sk.api_url.contains("ollama.com")).unwrap_or(settings.llm_active_source == "cloud");
+
+    let mut body = serde_json::json!({
+        "model": llm_model,
+        "messages": messages,
+        "stream": true,
+    });
+
+    if !is_openai_compat {
+        if settings.llm_think && !is_cloud { body["think"] = serde_json::json!(false); }
+        if settings.llm_max_tokens != 4096 { body["num_predict"] = serde_json::json!(settings.llm_max_tokens); }
+    } else {
+        if settings.llm_max_tokens != 4096 { body["max_tokens"] = serde_json::json!(settings.llm_max_tokens); }
+    }
+    if (settings.llm_temperature - 0.7).abs() > 0.001 { body["temperature"] = serde_json::json!(settings.llm_temperature); }
+
+    if let Some(tools) = tools {
+        if !tools.is_empty() {
+            let tools_to_send = if !is_openai_compat { normalize_tool_property_types(tools.to_vec()) } else { tools.to_vec() };
+            body["tools"] = serde_json::json!(tools_to_send);
+        }
+    }
+
+    let resp = match client
+        .post(&chat_url)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return Err(format!("Error calling LLM: {}", e)),
+    };
+
+    let mut full_content = String::new();
+    let mut tool_calls_raw: Option<serde_json::Value> = None;
+    let mut byte_stream = resp.bytes_stream();
+    let mut buf = String::new();
+    let mut streaming_started = false;
+
+    while let Some(chunk) = byte_stream.next().await {
+        let bytes = match chunk { Ok(b) => b, Err(_) => break };
+        buf.push_str(&String::from_utf8_lossy(&bytes));
+
+        while let Some(nl) = buf.find('\n') {
+            let line = buf[..nl].trim_end_matches('\r').to_string();
+            buf = buf[nl + 1..].to_string();
+            if line.is_empty() || line == "data: [DONE]" { continue; }
+
+            let json_str = if is_openai_compat {
+                line.strip_prefix("data: ").unwrap_or(&line).to_string()
+            } else { line.clone() };
+
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                if is_openai_compat {
+                    let delta = &json["choices"][0]["delta"];
+                    // Check for tool calls
+                    if let Some(tcs) = delta.get("tool_calls") {
+                        if tcs.is_array() && !tcs.as_array().unwrap().is_empty() {
+                            tool_calls_raw = Some(tcs.clone());
+                            // Not streaming content
+                            continue;
+                        }
+                    }
+                    // Content chunk
+                    if let Some(tok) = delta.get("content").and_then(|c| c.as_str()) {
+                        if !tok.is_empty() && tool_calls_raw.is_none() {
+                            full_content.push_str(tok);
+                            if !streaming_started {
+                                streaming_started = true;
+                                let _ = tx.send(sse_event(&serde_json::json!({"type": "status", "message": "Generating answer..."}))).await;
+                            }
+                            let _ = tx.send(sse_event(&serde_json::json!({"type": "answer_chunk", "text": tok}))).await;
+                        }
+                    }
+                } else {
+                    // Ollama native
+                    let done = json.get("done").and_then(|d| d.as_bool()).unwrap_or(false);
+                    let msg = json.get("message");
+                    if let Some(m) = msg {
+                        // Check for tool calls (Ollama sends them in one chunk)
+                        if let Some(tcs) = m.get("tool_calls") {
+                            if tcs.is_array() && !tcs.as_array().unwrap().is_empty() {
+                                tool_calls_raw = Some(tcs.clone());
+                                if done { break; }
+                                continue;
+                            }
+                        }
+                        if let Some(tok) = m.get("content").and_then(|c| c.as_str()) {
+                            if !tok.is_empty() && tool_calls_raw.is_none() {
+                                full_content.push_str(tok);
+                                if !streaming_started {
+                                    streaming_started = true;
+                                    let _ = tx.send(sse_event(&serde_json::json!({"type": "status", "message": "Generating answer..."}))).await;
+                                }
+                                let _ = tx.send(sse_event(&serde_json::json!({"type": "answer_chunk", "text": tok}))).await;
+                            }
+                        }
+                    }
+                    if done { break; }
+                }
+            }
+        }
+    }
+
+    // Assemble result in the same format as call_llm_chat
+    if let Some(tcs) = tool_calls_raw {
+        Ok(serde_json::json!({
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": tcs
+            }
+        }))
+    } else {
+        Ok(serde_json::json!({
+            "message": {
+                "role": "assistant",
+                "content": full_content
+            }
+        }))
+    }
+}
+
 /// Stream the final LLM answer token-by-token via SSE channel.
 /// Returns the complete accumulated text when done.
 async fn stream_llm_answer(
@@ -4725,7 +4886,7 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
             eprintln!("[Agent] Iteration {}/{}: Calling LLM...", iteration, max_iterations - 1);
             let _ = tx.send(sse_event(&serde_json::json!({"type": "status", "message": format!("LLM thinking... (iteration {})", iteration)}))).await;
 
-            let llm_result = call_llm_chat(&client, &messages, Some(&tool_defs), model_ref, share_key_opt.as_ref()).await;
+            let llm_result = call_llm_chat_streaming(&client, &messages, Some(&tool_defs), model_ref, share_key_opt.as_ref(), &tx).await;
 
             let response_json = match llm_result {
                 Ok(json) => json,
@@ -4754,19 +4915,11 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
                 let _ = tx.send(sse_event(&serde_json::json!({"type": "thinking", "thinking": t, "step": step_num}))).await;
             }
 
-            // No tool calls - final answer
+            // No tool calls - final answer (content was already streamed via answer_chunk events)
             if tool_calls.is_none() || tool_calls.as_ref().map_or(true, |tc| tc.is_empty()) {
-                if content.is_empty() {
-                    let _ = tx.send(sse_event(&serde_json::json!({"type": "answer", "answer": "I couldn't generate a response.", "success": true}))).await;
-                } else {
-                    // Emit content progressively so the user sees it appearing
-                    let _ = tx.send(sse_event(&serde_json::json!({"type": "status", "message": "Generating answer..."}))).await;
-                    for chunk in content.as_bytes().chunks(64) {
-                        let text = String::from_utf8_lossy(chunk).to_string();
-                        let _ = tx.send(sse_event(&serde_json::json!({"type": "answer_chunk", "text": text}))).await;
-                    }
-                    let _ = tx.send(sse_event(&serde_json::json!({"type": "answer", "answer": content, "success": true}))).await;
-                }
+                let answer = if content.is_empty() { "I couldn't generate a response.".to_string() } else { content };
+                // Remove streaming bubble and render final formatted answer
+                let _ = tx.send(sse_event(&serde_json::json!({"type": "answer", "answer": answer, "success": true}))).await;
                 let _ = tx.send(sse_event(&serde_json::json!({"type": "done"}))).await;
                 return;
             }
