@@ -1911,9 +1911,30 @@
             closeChatSidebarOnMobile();
         }
 
-        async function deleteConversation(id, event) {
+        async function confirmDeleteConversation(id, event) {
             event.stopPropagation();
             event.preventDefault();
+            const btn = event.currentTarget;
+            // Already in confirm state — do the delete
+            if (btn.dataset.confirming === '1') {
+                btn.dataset.confirming = '';
+                clearTimeout(btn._confirmTimer);
+                await deleteConversation(id);
+                return;
+            }
+            // Enter confirm state
+            btn.dataset.confirming = '1';
+            const original = btn.innerHTML;
+            btn.innerHTML = '<span style="font-size:0.7rem;white-space:nowrap;color:#ef4444;">Sil?</span>';
+            btn.style.minWidth = '40px';
+            btn._confirmTimer = setTimeout(() => {
+                btn.dataset.confirming = '';
+                btn.innerHTML = original;
+                btn.style.minWidth = '';
+            }, 3000);
+        }
+
+        async function deleteConversation(id) {
             conversations = conversations.filter(c => c.id !== id);
             saveConversations();
             if (id === activeConversationId) {
@@ -1987,7 +2008,7 @@
                 return `<div class="chat-sidebar-item ${isActive ? 'active' : ''}" onclick="switchConversation('${c.id}')">
                     <i class="fas fa-comment" style="font-size:0.65rem;flex-shrink:0;"></i>
                     <span class="conv-title" title="${escapeHtml(c.title)}">${escapeHtml(c.title)}</span>
-                    <button class="conv-delete" onclick="deleteConversation('${c.id}', event)" title="Delete"><i class="fas fa-times"></i></button>
+                    <button class="conv-delete" onclick="confirmDeleteConversation('${c.id}', event)" title="Delete"><i class="fas fa-times"></i></button>
                 </div>`;
             }).join('');
         }
