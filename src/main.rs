@@ -289,6 +289,36 @@ struct ReadRequest { username: String, name: String }
 #[derive(Deserialize)]
 struct WriteRequest { username: String, name: String, content: String }
 
+/// Per-user agent preferences stored in data/users/{username}/preferences.json
+#[derive(Clone, Serialize, Deserialize, Default)]
+struct UserPreferences {
+    /// Free-text instructions prepended to every agent system prompt
+    #[serde(default)]
+    custom_instructions: String,
+    /// If non-empty, completely replaces the built-in system prompt
+    #[serde(default)]
+    system_prompt_override: String,
+}
+
+fn get_user_preferences_path(username: &str) -> String {
+    format!("data/users/{}/preferences.json", username)
+}
+
+fn load_user_preferences(username: &str) -> UserPreferences {
+    std::fs::read_to_string(get_user_preferences_path(username))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_user_preferences(username: &str, prefs: &UserPreferences) {
+    std::fs::create_dir_all(get_user_dir(username)).ok();
+    std::fs::write(
+        get_user_preferences_path(username),
+        serde_json::to_string_pretty(prefs).unwrap_or_default(),
+    ).ok();
+}
+
 // Agent types
 #[derive(Deserialize)]
 struct AgentRequest {
@@ -4187,7 +4217,20 @@ async fn agent_react_fallback(
     step_num: &mut usize,
     state: &web::Data<AppState>,
 ) -> (bool, String) {
-    let system_prompt = build_react_system_prompt(username, conv_id);
+    let prefs = load_user_preferences(username);
+    let system_prompt = if !prefs.system_prompt_override.is_empty() {
+        prefs.system_prompt_override.clone()
+    } else {
+        let base = build_react_system_prompt(username, conv_id);
+        if prefs.custom_instructions.is_empty() {
+            base
+        } else {
+            format!(
+                "## User Preferences\nAlways follow these user preferences in every response:\n{}\n\n---\n\n{}",
+                prefs.custom_instructions, base
+            )
+        }
+    };
     let settings = current_settings();
     let max_iterations = settings.max_agent_iterations;
 
@@ -4366,7 +4409,20 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
     // Spawn the agent loop in a background task
     tokio::spawn(async move {
         let model_ref = model.as_deref();
-        let system_prompt = build_system_prompt(&username, &conv_id);
+        let prefs = load_user_preferences(&username);
+        let system_prompt = if !prefs.system_prompt_override.is_empty() {
+            prefs.system_prompt_override.clone()
+        } else {
+            let base = build_system_prompt(&username, &conv_id);
+            if prefs.custom_instructions.is_empty() {
+                base
+            } else {
+                format!(
+                    "## User Preferences\nAlways follow these user preferences in every response:\n{}\n\n---\n\n{}",
+                    prefs.custom_instructions, base
+                )
+            }
+        };
         let tool_defs = build_tool_definitions(&username);
         let settings = current_settings();
         let max_iterations = settings.max_agent_iterations;
@@ -5859,6 +5915,43 @@ fn start_cron_runner() {
     });
 }
 
+/// Get user preferences (custom instructions + optional system prompt override)
+#[get("/api/preferences")]
+async fn get_preferences(data: web::Data<AppState>, req: actix_web::HttpRequest) -> impl Responder {
+    let username = extract_token_username(&data, &req)
+        .unwrap_or_else(|| "guest".to_string());
+    let prefs = load_user_preferences(&username);
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "custom_instructions": prefs.custom_instructions,
+        "system_prompt_override": prefs.system_prompt_override,
+    }))
+}
+
+/// Save user preferences
+#[post("/api/preferences")]
+async fn save_preferences_endpoint(data: web::Data<AppState>, req: actix_web::HttpRequest, body: web::Json<serde_json::Value>) -> impl Responder {
+    let username = extract_token_username(&data, &req)
+        .unwrap_or_else(|| "guest".to_string());
+    let prefs = UserPreferences {
+        custom_instructions: body.get("custom_instructions")
+            .and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        system_prompt_override: body.get("system_prompt_override")
+            .and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    };
+    save_user_preferences(&username, &prefs);
+    HttpResponse::Ok().json(serde_json::json!({ "success": true }))
+}
+
+/// Return the built-in system prompt so the frontend can display it
+#[get("/api/system-prompt")]
+async fn get_system_prompt_endpoint(data: web::Data<AppState>, req: actix_web::HttpRequest) -> impl Responder {
+    let username = extract_token_username(&data, &req)
+        .unwrap_or_else(|| "guest".to_string());
+    let prompt = build_system_prompt(&username, "");
+    HttpResponse::Ok().json(serde_json::json!({ "success": true, "system_prompt": prompt }))
+}
+
 /// Return saved conversations for the authenticated user
 #[get("/api/conversations")]
 async fn get_conversations(data: web::Data<AppState>, req: actix_web::HttpRequest) -> impl Responder {
@@ -5967,6 +6060,9 @@ async fn main() -> std::io::Result<()> {
             .service(update_settings)
             .service(get_conversations)
             .service(save_conversations_endpoint)
+            .service(get_preferences)
+            .service(save_preferences_endpoint)
+            .service(get_system_prompt_endpoint)
             .service(test_llm)
             .service(tools_list)
             .service(health)

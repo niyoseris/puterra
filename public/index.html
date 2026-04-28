@@ -343,7 +343,116 @@
             display: flex;
             flex-direction: column;
             min-width: 0;
+            position: relative;
+            overflow: hidden;
         }
+
+        /* Preferences panel */
+        .prefs-panel {
+            position: absolute;
+            top: 0; right: 0;
+            width: 300px;
+            height: 100%;
+            background: rgba(15, 14, 30, 0.98);
+            border-left: 1px solid rgba(255,255,255,0.1);
+            display: flex;
+            flex-direction: column;
+            transform: translateX(100%);
+            transition: transform 0.22s ease;
+            z-index: 50;
+        }
+        .prefs-panel.open { transform: translateX(0); }
+        .prefs-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: #a5b4fc;
+            flex-shrink: 0;
+        }
+        .prefs-close-btn {
+            background: none;
+            border: none;
+            color: #9ca3af;
+            cursor: pointer;
+            font-size: 1.1rem;
+            padding: 0 4px;
+        }
+        .prefs-close-btn:hover { color: #fff; }
+        .prefs-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .prefs-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: #d1d5db;
+            margin-bottom: 4px;
+        }
+        .prefs-hint {
+            font-size: 0.7rem;
+            color: #6b7280;
+            margin-bottom: 6px;
+        }
+        .prefs-textarea {
+            width: 100%;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 6px;
+            color: #e5e7eb;
+            font-size: 0.78rem;
+            padding: 8px;
+            resize: vertical;
+            font-family: inherit;
+            line-height: 1.5;
+            box-sizing: border-box;
+        }
+        .prefs-textarea:focus { outline: none; border-color: rgba(99,102,241,0.5); }
+        .prefs-textarea[readonly] { color: #6b7280; font-size: 0.72rem; }
+        .prefs-save-btn {
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            border: none;
+            border-radius: 6px;
+            color: #fff;
+            padding: 8px 14px;
+            cursor: pointer;
+            font-size: 0.78rem;
+            font-weight: 600;
+            width: 100%;
+        }
+        .prefs-save-btn:hover { opacity: 0.9; }
+        .prefs-divider {
+            border: none;
+            border-top: 1px solid rgba(255,255,255,0.08);
+        }
+        .prefs-prompt-toggle {
+            font-size: 0.72rem;
+            color: #818cf8;
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 2px 0;
+            text-align: left;
+        }
+        .prefs-prompt-toggle:hover { color: #a5b4fc; }
+        .prefs-btn { margin-top: 2px; }
+        .prefs-open-btn {
+            background: none;
+            border: none;
+            color: #9ca3af;
+            cursor: pointer;
+            padding: 4px 6px;
+            font-size: 0.9rem;
+            border-radius: 4px;
+        }
+        .prefs-open-btn:hover { color: #a5b4fc; background: rgba(99,102,241,0.15); }
         .chat-messages {
             flex: 1;
             min-height: 0;
@@ -2161,6 +2270,48 @@
                                     <i class="fas fa-bars"></i>
                                 </button>
                                 <span style="font-size:0.8rem;color:#a5b4fc;font-weight:500;">Puterra AI</span>
+                                <button class="prefs-open-btn" onclick="togglePrefsPanel()" title="Tercihler & System Prompt">
+                                    <i class="fas fa-sliders-h"></i>
+                                </button>
+                            </div>
+                            <!-- Preferences panel -->
+                            <div class="prefs-panel" id="prefsPanel">
+                                <div class="prefs-header">
+                                    <span><i class="fas fa-sliders-h" style="margin-right:6px;"></i>Tercihler</span>
+                                    <button class="prefs-close-btn" onclick="togglePrefsPanel()">×</button>
+                                </div>
+                                <div class="prefs-body">
+                                    <div>
+                                        <div class="prefs-label">Tercihlerim</div>
+                                        <div class="prefs-hint">Agent her mesajda bu tercihlere uyar. Dil, ton, format, kısıtlamalar yazabilirsin.</div>
+                                        <textarea class="prefs-textarea" id="customInstructionsInput" rows="6"
+                                            placeholder="Örn:&#10;- Her zaman Türkçe yanıt ver&#10;- Kısa ve öz ol&#10;- Kodları yorumsuz yazma&#10;- Tablo yerine liste kullan"></textarea>
+                                    </div>
+                                    <div>
+                                        <label style="display:flex;align-items:center;gap:8px;font-size:0.75rem;color:#d1d5db;cursor:pointer;">
+                                            <input type="checkbox" id="overridePromptCheck" onchange="toggleOverridePrefSection()">
+                                            System Promptu tamamen özelleştir
+                                        </label>
+                                    </div>
+                                    <div id="overridePrefSection" style="display:none;">
+                                        <div class="prefs-hint" style="margin-bottom:4px;">Varsayılan system promptu tamamen bu metinle değiştirir. Araç tanımları eklenmez.</div>
+                                        <textarea class="prefs-textarea" id="systemPromptOverrideInput" rows="8"
+                                            placeholder="Özel system promptunu buraya yaz..."></textarea>
+                                    </div>
+                                    <button class="prefs-save-btn" onclick="savePreferences()">
+                                        <i class="fas fa-save" style="margin-right:6px;"></i>Kaydet
+                                    </button>
+                                    <hr class="prefs-divider">
+                                    <div>
+                                        <div class="prefs-label">Mevcut System Prompt</div>
+                                        <div class="prefs-hint">Agent şu an bu promptla çalışıyor (salt okunur).</div>
+                                        <button class="prefs-prompt-toggle" onclick="toggleSystemPromptView()">
+                                            <i class="fas fa-eye" style="margin-right:4px;"></i>Görüntüle / Gizle
+                                        </button>
+                                        <textarea class="prefs-textarea" id="systemPromptView" readonly rows="10"
+                                            style="display:none;margin-top:6px;"></textarea>
+                                    </div>
+                                </div>
                             </div>
                             <div class="chat-container">
                                 <div class="chat-messages" id="chatMessages">
@@ -2671,6 +2822,79 @@
             el.style.height = '40px';
             el.style.height = Math.min(el.scrollHeight, 160) + 'px';
         }
+
+        // ── Preferences panel ──────────────────────────────────────────
+        function togglePrefsPanel() {
+            const panel = document.getElementById('prefsPanel');
+            if (!panel) return;
+            const isOpen = panel.classList.toggle('open');
+            if (isOpen) loadPreferences();
+        }
+
+        async function loadPreferences() {
+            const token = localStorage.getItem('auth_token') || '';
+            try {
+                const res = await fetch(`${API}/preferences`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (!res.ok) return;
+                const data = await res.json();
+                if (!data.success) return;
+                const ciEl = document.getElementById('customInstructionsInput');
+                const ovEl = document.getElementById('systemPromptOverrideInput');
+                const ovChk = document.getElementById('overridePromptCheck');
+                if (ciEl) ciEl.value = data.custom_instructions || '';
+                if (ovEl) ovEl.value = data.system_prompt_override || '';
+                if (ovChk) {
+                    ovChk.checked = !!(data.system_prompt_override);
+                    toggleOverridePrefSection();
+                }
+            } catch (_) {}
+        }
+
+        async function savePreferences() {
+            const token = localStorage.getItem('auth_token') || '';
+            const ci = document.getElementById('customInstructionsInput')?.value || '';
+            const override = document.getElementById('overridePromptCheck')?.checked
+                ? (document.getElementById('systemPromptOverrideInput')?.value || '')
+                : '';
+            try {
+                const res = await fetch(`${API}/preferences`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                    body: JSON.stringify({ custom_instructions: ci, system_prompt_override: override })
+                });
+                const data = await res.json();
+                if (data.success) showToast('Tercihler kaydedildi', 'success');
+                else showToast('Kayıt hatası', 'error');
+            } catch (_) {
+                showToast('Bağlantı hatası', 'error');
+            }
+        }
+
+        function toggleOverridePrefSection() {
+            const chk = document.getElementById('overridePromptCheck');
+            const sec = document.getElementById('overridePrefSection');
+            if (sec) sec.style.display = chk?.checked ? 'block' : 'none';
+        }
+
+        async function toggleSystemPromptView() {
+            const el = document.getElementById('systemPromptView');
+            if (!el) return;
+            if (el.style.display !== 'none') { el.style.display = 'none'; return; }
+            if (!el.value) {
+                const token = localStorage.getItem('auth_token') || '';
+                try {
+                    const res = await fetch(`${API}/system-prompt`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    const data = await res.json();
+                    el.value = data.system_prompt || '';
+                } catch (_) { el.value = 'Yüklenemedi.'; }
+            }
+            el.style.display = 'block';
+        }
+        // ────────────────────────────────────────────────────────────────
 
         async function uploadFilesFromChat(input) {
             const files = Array.from(input.files);
