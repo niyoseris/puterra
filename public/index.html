@@ -2700,6 +2700,55 @@
                                 </div>
                             </div>
 
+                            <!-- Font Preferences -->
+                            <div>
+                                <h3 style="margin-bottom:10px;color:#a5b4fc;font-size:0.9rem;text-transform:uppercase;letter-spacing:1px;">
+                                    <i class="fas fa-font"></i> Font Preferences
+                                </h3>
+                                <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px;display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                                    <div>
+                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;text-transform:uppercase;font-weight:600;">Desktop Font</label>
+                                        <select id="set_desktop_font" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;background:rgba(0,0,0,0.3);">
+                                            <option value="Inter">Inter</option>
+                                            <option value="system-ui">System UI</option>
+                                            <option value="Courier New">Courier New</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;text-transform:uppercase;font-weight:600;">Desktop Size</label>
+                                        <select id="set_desktop_font_size" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;background:rgba(0,0,0,0.3);">
+                                            <option value="0.75rem">12px</option>
+                                            <option value="0.8125rem">13px</option>
+                                            <option value="0.875rem">14px (default)</option>
+                                            <option value="0.9375rem">15px</option>
+                                            <option value="1rem">16px</option>
+                                            <option value="1.0625rem">17px</option>
+                                            <option value="1.125rem">18px</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;text-transform:uppercase;font-weight:600;">Mobile Font</label>
+                                        <select id="set_mobile_font" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;background:rgba(0,0,0,0.3);">
+                                            <option value="Inter">Inter</option>
+                                            <option value="system-ui">System UI</option>
+                                            <option value="Courier New">Courier New</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;text-transform:uppercase;font-weight:600;">Mobile Size</label>
+                                        <select id="set_mobile_font_size" class="input-field" style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.85rem;background:rgba(0,0,0,0.3);">
+                                            <option value="0.875rem">14px</option>
+                                            <option value="0.9375rem">15px</option>
+                                            <option value="1rem">16px (default)</option>
+                                            <option value="1.0625rem">17px</option>
+                                            <option value="1.125rem">18px</option>
+                                            <option value="1.1875rem">19px</option>
+                                            <option value="1.25rem">20px</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+
                             <!-- Agent Preferences -->
                             <div>
                                 <h3 style="margin-bottom:10px;color:#a5b4fc;font-size:0.9rem;text-transform:uppercase;letter-spacing:1px;">
@@ -3282,6 +3331,28 @@
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
             saveChatHistory();
         }
+
+        // Apply font preferences based on viewport size
+        function applyFontPreferences(settings) {
+            const isMobile = window.innerWidth <= 768;
+            const font = isMobile ? (settings?.mobile_font || 'Inter') : (settings?.desktop_font || 'Inter');
+            const fontSize = isMobile ? (settings?.mobile_font_size || '1rem') : (settings?.desktop_font_size || '0.875rem');
+
+            const root = document.documentElement;
+            root.style.setProperty('--app-font', font);
+            root.style.setProperty('--app-font-size', fontSize);
+
+            // Apply to body
+            document.body.style.fontFamily = font;
+            document.body.style.fontSize = fontSize;
+        }
+
+        // Re-apply fonts when window is resized (mobile/desktop toggle)
+        window.addEventListener('resize', () => {
+            if (cachedSettings) {
+                applyFontPreferences(cachedSettings);
+            }
+        });
 
         // Render agent steps as a collapsible UI
         function renderAgentSteps(steps) {
@@ -3902,6 +3973,13 @@ sys.stderr = io.StringIO()
                     if (el('set_timeout_image')) el('set_timeout_image').value = s.timeout_image || 30;
                     if (el('set_timeout_llm_test')) el('set_timeout_llm_test').value = s.timeout_llm_test || 60;
 
+                    // Font preferences
+                    if (el('set_desktop_font')) el('set_desktop_font').value = s.desktop_font || 'Inter';
+                    if (el('set_desktop_font_size')) el('set_desktop_font_size').value = s.desktop_font_size || '0.875rem';
+                    if (el('set_mobile_font')) el('set_mobile_font').value = s.mobile_font || 'Inter';
+                    if (el('set_mobile_font_size')) el('set_mobile_font_size').value = s.mobile_font_size || '1rem';
+                    applyFontPreferences(s);
+
                     // Security
                     if (el('set_shell_enabled')) {
                         el('set_shell_enabled').checked = s.shell_enabled !== false;
@@ -3979,6 +4057,12 @@ sys.stderr = io.StringIO()
                 timeout_web_search: parseInt(el('set_timeout_web_search')?.value) || 15,
                 timeout_image: parseInt(el('set_timeout_image')?.value) || 30,
                 timeout_llm_test: parseInt(el('set_timeout_llm_test')?.value) || 60,
+
+                // Font preferences
+                desktop_font: el('set_desktop_font')?.value || 'Inter',
+                desktop_font_size: el('set_desktop_font_size')?.value || '0.875rem',
+                mobile_font: el('set_mobile_font')?.value || 'Inter',
+                mobile_font_size: el('set_mobile_font_size')?.value || '1rem',
             };
 
             // Only send API keys if user typed a new one (not the masked value)
@@ -4022,6 +4106,9 @@ sys.stderr = io.StringIO()
                             body: JSON.stringify(prefsPayload)
                         });
                     } catch (_) {}
+                    // Apply font changes immediately
+                    cachedSettings = payload;
+                    applyFontPreferences(payload);
                     showToast('Settings saved!', 'success');
                 } else {
                     showToast(data.error || 'Save failed', 'error');

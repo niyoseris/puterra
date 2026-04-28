@@ -83,6 +83,10 @@ fn default_timeout_llm_test() -> u64 { 60 }
 fn default_llm_temperature() -> f64 { 0.7 }
 fn default_llm_max_tokens() -> u64 { 4096 }
 fn default_chat_context_limit() -> usize { 200 }
+fn default_desktop_font() -> String { "Inter".to_string() }
+fn default_desktop_font_size() -> String { "0.875rem".to_string() }
+fn default_mobile_font() -> String { "Inter".to_string() }
+fn default_mobile_font_size() -> String { "1rem".to_string() }
 
 /// Persistent settings stored in data/settings.json
 #[derive(Clone, Serialize, Deserialize)]
@@ -138,6 +142,16 @@ struct Settings {
     // Chat context window
     #[serde(default = "default_chat_context_limit")]
     chat_context_limit: usize,
+
+    // UI font preferences (per-user)
+    #[serde(default = "default_desktop_font")]
+    desktop_font: String,
+    #[serde(default = "default_desktop_font_size")]
+    desktop_font_size: String,
+    #[serde(default = "default_mobile_font")]
+    mobile_font: String,
+    #[serde(default = "default_mobile_font_size")]
+    mobile_font_size: String,
 }
 
 impl Default for Settings {
@@ -190,6 +204,11 @@ impl Default for Settings {
             llm_think: false,
 
             chat_context_limit: 200,
+
+            desktop_font: "Inter".to_string(),
+            desktop_font_size: "0.875rem".to_string(),
+            mobile_font: "Inter".to_string(),
+            mobile_font_size: "1rem".to_string(),
         }
     }
 }
