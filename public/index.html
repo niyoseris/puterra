@@ -2270,49 +2270,6 @@
                                     <i class="fas fa-bars"></i>
                                 </button>
                                 <span style="font-size:0.8rem;color:#a5b4fc;font-weight:500;">Puterra AI</span>
-                                <button class="prefs-open-btn" onclick="togglePrefsPanel()" title="Tercihler & System Prompt">
-                                    <i class="fas fa-sliders-h"></i>
-                                </button>
-                            </div>
-                            <!-- Preferences panel -->
-                            <div class="prefs-panel" id="prefsPanel">
-                                <div class="prefs-header">
-                                    <span><i class="fas fa-sliders-h" style="margin-right:6px;"></i>Tercihler</span>
-                                    <button class="prefs-close-btn" onclick="togglePrefsPanel()">×</button>
-                                </div>
-                                <div class="prefs-body">
-                                    <div>
-                                        <div class="prefs-label">Tercihlerim</div>
-                                        <div class="prefs-hint">Agent her mesajda bu tercihlere uyar. Dil, ton, format, kısıtlamalar yazabilirsin.</div>
-                                        <textarea class="prefs-textarea" id="customInstructionsInput" rows="6"
-                                            placeholder="Örn:&#10;- Her zaman Türkçe yanıt ver&#10;- Kısa ve öz ol&#10;- Kodları yorumsuz yazma&#10;- Tablo yerine liste kullan"></textarea>
-                                    </div>
-                                    <div>
-                                        <label style="display:flex;align-items:center;gap:8px;font-size:0.75rem;color:#d1d5db;cursor:pointer;">
-                                            <input type="checkbox" id="overridePromptCheck" onchange="toggleOverridePrefSection()">
-                                            System Promptu tamamen özelleştir
-                                        </label>
-                                    </div>
-                                    <div id="overridePrefSection" style="display:none;">
-                                        <div class="prefs-hint" style="margin-bottom:4px;">Varsayılan system promptu tamamen bu metinle değiştirir. Araç tanımları eklenmez.</div>
-                                        <textarea class="prefs-textarea" id="systemPromptOverrideInput" rows="8"
-                                            placeholder="Özel system promptunu buraya yaz..."></textarea>
-                                    </div>
-                                    <button class="prefs-save-btn" onclick="savePreferences()">
-                                        <i class="fas fa-save" style="margin-right:6px;"></i>Kaydet
-                                    </button>
-                                    <hr class="prefs-divider">
-                                    <div>
-                                        <div class="prefs-label">Mevcut System Prompt</div>
-                                        <div class="prefs-hint">Agent şu an bu promptla çalışıyor (salt okunur).</div>
-                                        <button class="prefs-prompt-toggle" onclick="toggleSystemPromptView()">
-                                            <i class="fas fa-eye" style="margin-right:4px;"></i>Görüntüle / Gizle
-                                        </button>
-                                        <textarea class="prefs-textarea" id="systemPromptView" readonly rows="10"
-                                            style="display:none;margin-top:6px;"></textarea>
-                                    </div>
-                                </div>
-                            </div>
                             <div class="chat-container">
                                 <div class="chat-messages" id="chatMessages">
                                     <div class="chat-message assistant">
@@ -2700,6 +2657,41 @@
                                 </div>
                             </div>
 
+                            <!-- Agent Preferences -->
+                            <div>
+                                <h3 style="margin-bottom:10px;color:#a5b4fc;font-size:0.9rem;text-transform:uppercase;letter-spacing:1px;">
+                                    <i class="fas fa-sliders-h"></i> Agent Tercihleri
+                                </h3>
+                                <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:10px;">
+                                    <div>
+                                        <label style="color:#9ca3af;font-size:0.75rem;display:block;margin-bottom:4px;">Tercihlerim / Custom Instructions</label>
+                                        <div style="color:#6b7280;font-size:0.7rem;margin-bottom:6px;">Agent her mesajda bu tercihlere uyar. Dil, ton, format, kısıtlamalar yazabilirsin.</div>
+                                        <textarea id="set_custom_instructions" class="input-field" rows="5"
+                                            style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.82rem;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);resize:vertical;font-family:inherit;line-height:1.5;box-sizing:border-box;"
+                                            placeholder="Örn:&#10;- Her zaman Türkçe yanıt ver&#10;- Kısa ve öz ol&#10;- Kodları yorumsuz yazma&#10;- Tablo yerine liste kullan"></textarea>
+                                    </div>
+                                    <div>
+                                        <label style="display:flex;align-items:center;gap:8px;font-size:0.75rem;color:#9ca3af;cursor:pointer;">
+                                            <input type="checkbox" id="set_override_prompt_check" onchange="toggleSettingsOverrideSection()">
+                                            System Promptu tamamen özelleştir (varsayılanı devre dışı bırakır)
+                                        </label>
+                                    </div>
+                                    <div id="settingsOverrideSection" style="display:none;">
+                                        <div style="color:#6b7280;font-size:0.7rem;margin-bottom:6px;">Varsayılan system promptu tamamen bu metinle değiştirir. Araç tanımları dahil edilmez.</div>
+                                        <textarea id="set_system_prompt_override" class="input-field" rows="8"
+                                            style="width:100%;padding:8px 10px;border-radius:6px;color:#fff;font-size:0.78rem;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);resize:vertical;font-family:monospace;line-height:1.5;box-sizing:border-box;"
+                                            placeholder="Özel system promptunu buraya yaz..."></textarea>
+                                    </div>
+                                    <div>
+                                        <button onclick="toggleSettingsSystemPromptView()" style="background:none;border:none;color:#818cf8;cursor:pointer;font-size:0.75rem;padding:0;">
+                                            <i class="fas fa-eye" style="margin-right:4px;"></i>Mevcut system promptu görüntüle / gizle
+                                        </button>
+                                        <textarea id="set_system_prompt_view" readonly rows="8"
+                                            style="display:none;margin-top:6px;width:100%;padding:8px 10px;border-radius:6px;color:#6b7280;font-size:0.72rem;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);resize:vertical;font-family:monospace;line-height:1.5;box-sizing:border-box;"></textarea>
+                                    </div>
+                                </div>
+                            </div>
+
                             <!-- Security -->
                             <div>
                                 <h3 style="margin-bottom:10px;color:#a5b4fc;font-size:0.9rem;text-transform:uppercase;letter-spacing:1px;">
@@ -2880,6 +2872,29 @@
 
         async function toggleSystemPromptView() {
             const el = document.getElementById('systemPromptView');
+            if (!el) return;
+            if (el.style.display !== 'none') { el.style.display = 'none'; return; }
+            if (!el.value) {
+                const token = localStorage.getItem('auth_token') || '';
+                try {
+                    const res = await fetch(`${API}/system-prompt`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    const data = await res.json();
+                    el.value = data.system_prompt || '';
+                } catch (_) { el.value = 'Yüklenemedi.'; }
+            }
+            el.style.display = 'block';
+        }
+
+        function toggleSettingsOverrideSection() {
+            const chk = document.getElementById('set_override_prompt_check');
+            const sec = document.getElementById('settingsOverrideSection');
+            if (sec) sec.style.display = chk?.checked ? 'block' : 'none';
+        }
+
+        async function toggleSettingsSystemPromptView() {
+            const el = document.getElementById('set_system_prompt_view');
             if (!el) return;
             if (el.style.display !== 'none') { el.style.display = 'none'; return; }
             if (!el.value) {
@@ -3813,6 +3828,25 @@ sys.stderr = io.StringIO()
             } catch (e) {
                 showToast('Failed to load settings', 'error');
             }
+            // Load agent preferences separately
+            try {
+                const token = localStorage.getItem('auth_token') || '';
+                const pr = await fetch(`${API}/preferences`, { headers: { 'Authorization': `Bearer ${token}` } });
+                if (pr.ok) {
+                    const pd = await pr.json();
+                    if (pd.success) {
+                        const ci = document.getElementById('set_custom_instructions');
+                        const ov = document.getElementById('set_system_prompt_override');
+                        const chk = document.getElementById('set_override_prompt_check');
+                        if (ci) ci.value = pd.custom_instructions || '';
+                        if (ov) ov.value = pd.system_prompt_override || '';
+                        if (chk) {
+                            chk.checked = !!(pd.system_prompt_override);
+                            toggleSettingsOverrideSection();
+                        }
+                    }
+                }
+            } catch (_) {}
         }
 
         function updateToggle(checkbox) {
@@ -3885,6 +3919,21 @@ sys.stderr = io.StringIO()
                 });
                 const data = await res.json();
                 if (data.success) {
+                    // Also save preferences
+                    const el = (id) => document.getElementById(id);
+                    const prefsPayload = {
+                        custom_instructions: el('set_custom_instructions')?.value || '',
+                        system_prompt_override: el('set_override_prompt_check')?.checked
+                            ? (el('set_system_prompt_override')?.value || '')
+                            : ''
+                    };
+                    try {
+                        await fetch(`${API}/preferences`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                            body: JSON.stringify(prefsPayload)
+                        });
+                    } catch (_) {}
                     showToast('Settings saved!', 'success');
                 } else {
                     showToast(data.error || 'Save failed', 'error');

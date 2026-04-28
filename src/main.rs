@@ -2239,7 +2239,7 @@ async fn validate_token(data: web::Data<AppState>, req: actix_web::HttpRequest) 
             }
         }
     }
-    HttpResponse::Unauthorized().json(serde_json::json!({ "valid": false }))
+    HttpResponse::Ok().json(serde_json::json!({ "valid": false }))
 }
 
 // ============================================================
@@ -2498,13 +2498,28 @@ window.fetch=function(url,...args){{
 
 /// Upload file(s) via multipart form data
 #[post("/api/files/upload/{username}")]
-async fn upload_file(path: web::Path<String>, mut payload: Multipart) -> impl Responder {
+async fn upload_file(req: actix_web::HttpRequest, path: web::Path<String>, mut payload: Multipart) -> impl Responder {
+    // Reject oversized requests early based on Content-Length (avoids streaming a huge body)
+    const MAX_UPLOAD: usize = 200 * 1024 * 1024; // 200 MB total
+    if let Some(cl) = req.headers().get(actix_web::http::header::CONTENT_LENGTH) {
+        if let Ok(s) = cl.to_str() {
+            if let Ok(n) = s.parse::<usize>() {
+                if n > MAX_UPLOAD {
+                    return HttpResponse::PayloadTooLarge().json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Upload exceeds 200MB limit (got {} bytes)", n)
+                    }));
+                }
+            }
+        }
+    }
+
     let username = path.into_inner();
     let user_dir = get_user_dir(&username);
     std::fs::create_dir_all(&user_dir).ok();
 
     let mut uploaded: Vec<String> = Vec::new();
-    let max_size: usize = 50 * 1024 * 1024; // 50 MB per file
+    let max_size: usize = 200 * 1024 * 1024; // 200 MB per file
 
     while let Some(item) = payload.next().await {
         let mut field = match item {
@@ -6031,8 +6046,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(app_state.clone())
-            .app_data(actix_web::web::PayloadConfig::default()
-                .limit(52 * 1024 * 1024)) // 52 MB limit for multipart uploads
+            .app_data(actix_web::web::PayloadConfig::new(200 * 1024 * 1024))
             .service(index)
             .service(signup)
             .service(login)
