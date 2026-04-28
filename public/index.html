@@ -3258,8 +3258,25 @@
                             if (statusEl) statusEl.textContent = evt.message;
                         }
 
+                        else if (evt.type === 'answer_chunk') {
+                            // Stream tokens into a live bubble
+                            let streamEl = document.getElementById('agent-stream-bubble');
+                            if (!streamEl) {
+                                streamEl = document.createElement('div');
+                                streamEl.id = 'agent-stream-bubble';
+                                streamEl.className = 'chat-message assistant';
+                                streamEl.style.opacity = '0.85';
+                                messagesDiv.appendChild(streamEl);
+                            }
+                            streamEl.textContent += evt.text || '';
+                            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                        }
+
                         else if (evt.type === 'answer') {
                             finalAnswer = evt.answer || '';
+                            // Remove streaming bubble — it will be replaced by properly rendered answer
+                            const streamEl = document.getElementById('agent-stream-bubble');
+                            if (streamEl) streamEl.remove();
                         }
 
                         else if (evt.type === 'error') {

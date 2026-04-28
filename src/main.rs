@@ -1969,6 +1969,129 @@ async fn do_direct_web_fetch(client: &reqwest::Client, url: &str) -> Result<Stri
     }
 }
 
+/// Stream the final LLM answer token-by-token via SSE channel.
+/// Returns the complete accumulated text when done.
+async fn stream_llm_answer(
+    client: &reqwest::Client,
+    messages: &[serde_json::Value],
+    model: Option<&str>,
+    share_key: Option<&ShareKey>,
+    tx: &tokio::sync::mpsc::Sender<String>,
+) -> String {
+    use futures::StreamExt;
+
+    let settings = current_settings();
+    let (api_url, llm_model, api_key): (String, String, String) = if let Some(sk) = share_key {
+        (sk.api_url.clone(), model.unwrap_or(&sk.model).to_string(), sk.api_key.clone())
+    } else {
+        match settings.llm_active_source.as_str() {
+            "cloud" => (settings.llm_api_url_cloud.clone(), model.unwrap_or(&settings.llm_model_cloud).to_string(), settings.llm_api_key_cloud.clone()),
+            _ => (settings.llm_api_url_local.clone(), model.unwrap_or(&settings.llm_model_local).to_string(), settings.llm_api_key_local.clone()),
+        }
+    };
+
+    let base = api_url.trim_end_matches('/');
+    let chat_url = if base.ends_with("/chat") || base.ends_with("/chat/completions") {
+        base.to_string()
+    } else if settings.llm_provider == "openai" && !base.contains("ollama.com") {
+        format!("{}/chat/completions", base)
+    } else {
+        format!("{}/chat", base)
+    };
+
+    let is_openai_compat = chat_url.ends_with("/chat/completions");
+    let is_cloud = share_key.map(|sk| sk.api_url.contains("ollama.com")).unwrap_or(settings.llm_active_source == "cloud");
+
+    let mut body = serde_json::json!({
+        "model": llm_model,
+        "messages": messages,
+        "stream": true,
+    });
+
+    if !is_openai_compat {
+        if settings.llm_think && !is_cloud {
+            body["think"] = serde_json::json!(false); // no think for final answer
+        }
+        if settings.llm_max_tokens != 4096 {
+            body["num_predict"] = serde_json::json!(settings.llm_max_tokens);
+        }
+    } else {
+        if settings.llm_max_tokens != 4096 {
+            body["max_tokens"] = serde_json::json!(settings.llm_max_tokens);
+        }
+    }
+    if (settings.llm_temperature - 0.7).abs() > 0.001 {
+        body["temperature"] = serde_json::json!(settings.llm_temperature);
+    }
+
+    let resp = match client
+        .post(&chat_url)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[Stream] Request error: {}", e);
+            return format!("Error: {}", e);
+        }
+    };
+
+    let mut full_text = String::new();
+    let mut byte_stream = resp.bytes_stream();
+    let mut buf = String::new();
+
+    while let Some(chunk) = byte_stream.next().await {
+        let bytes = match chunk {
+            Ok(b) => b,
+            Err(_) => break,
+        };
+        buf.push_str(&String::from_utf8_lossy(&bytes));
+
+        while let Some(nl) = buf.find('\n') {
+            let line = buf[..nl].trim_end_matches('\r').to_string();
+            buf = buf[nl + 1..].to_string();
+
+            if line.is_empty() || line == "data: [DONE]" { continue; }
+
+            let json_str = if is_openai_compat {
+                line.strip_prefix("data: ").unwrap_or(&line).to_string()
+            } else {
+                line.clone()
+            };
+
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                let token = if is_openai_compat {
+                    json["choices"][0]["delta"]["content"].as_str().unwrap_or("").to_string()
+                } else {
+                    let done = json.get("done").and_then(|d| d.as_bool()).unwrap_or(false);
+                    if done { continue; }
+                    json.get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
+
+                if !token.is_empty() {
+                    full_text.push_str(&token);
+                    let _ = tx.send(sse_event(&serde_json::json!({
+                        "type": "answer_chunk",
+                        "text": token
+                    }))).await;
+                }
+            }
+        }
+    }
+
+    if full_text.is_empty() {
+        eprintln!("[Stream] Empty response, falling back to non-streaming");
+    }
+    full_text
+}
+
 /// Call LLM with messages array and optional tools (native Ollama/OpenAI tool calling)
 /// Pass `share_key_override` to use a share key's LLM config instead of global settings
 async fn call_llm_chat(
@@ -4633,8 +4756,17 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
 
             // No tool calls - final answer
             if tool_calls.is_none() || tool_calls.as_ref().map_or(true, |tc| tc.is_empty()) {
-                let answer = if content.is_empty() { "I couldn't generate a response.".to_string() } else { content };
-                let _ = tx.send(sse_event(&serde_json::json!({"type": "answer", "answer": answer, "success": true}))).await;
+                if content.is_empty() {
+                    let _ = tx.send(sse_event(&serde_json::json!({"type": "answer", "answer": "I couldn't generate a response.", "success": true}))).await;
+                } else {
+                    // Emit content progressively so the user sees it appearing
+                    let _ = tx.send(sse_event(&serde_json::json!({"type": "status", "message": "Generating answer..."}))).await;
+                    for chunk in content.as_bytes().chunks(64) {
+                        let text = String::from_utf8_lossy(chunk).to_string();
+                        let _ = tx.send(sse_event(&serde_json::json!({"type": "answer_chunk", "text": text}))).await;
+                    }
+                    let _ = tx.send(sse_event(&serde_json::json!({"type": "answer", "answer": content, "success": true}))).await;
+                }
                 let _ = tx.send(sse_event(&serde_json::json!({"type": "done"}))).await;
                 return;
             }
@@ -4679,22 +4811,26 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
             }
         }
 
-        // Max iterations - ask for summary
+        // Max iterations - ask for summary using streaming so the user sees output immediately
         messages.push(serde_json::json!({
             "role": "user",
             "content": "Please provide your final answer now based on all the information you've gathered. Respond in the same language as the original question."
         }));
-        let final_result = call_llm_chat(&client, &messages, None, model_ref, share_key_opt.as_ref()).await;
-        let answer = match final_result {
-            Ok(json) => {
-                let m = json.get("message");
-                let c = m.and_then(|m| m.get("content")).and_then(|c| c.as_str()).unwrap_or("");
-                if c.is_empty() {
-                    m.and_then(|m| m.get("thinking")).and_then(|t| t.as_str()).unwrap_or("Max iterations reached.").to_string()
-                } else { c.to_string() }
+        let _ = tx.send(sse_event(&serde_json::json!({"type": "status", "message": "Generating final answer..."}))).await;
+        let answer = stream_llm_answer(&client, &messages, model_ref, share_key_opt.as_ref(), &tx).await;
+        let answer = if answer.is_empty() {
+            // Fallback to non-streaming if streaming returned empty
+            match call_llm_chat(&client, &messages, None, model_ref, share_key_opt.as_ref()).await {
+                Ok(json) => {
+                    let m = json.get("message");
+                    let c = m.and_then(|m| m.get("content")).and_then(|c| c.as_str()).unwrap_or("");
+                    if c.is_empty() {
+                        m.and_then(|m| m.get("thinking")).and_then(|t| t.as_str()).unwrap_or("Max iterations reached.").to_string()
+                    } else { c.to_string() }
+                }
+                Err(e) => format!("Error: {}", e),
             }
-            Err(e) => format!("Error: {}", e),
-        };
+        } else { answer };
 
         let _ = tx.send(sse_event(&serde_json::json!({"type": "answer", "answer": answer, "success": true}))).await;
         let _ = tx.send(sse_event(&serde_json::json!({"type": "done"}))).await;
