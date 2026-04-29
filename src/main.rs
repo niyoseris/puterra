@@ -4466,10 +4466,10 @@ You have access to powerful tools. You MUST use tools when you need real-time in
     Input: {{"code": "print('hello')"}}
 13. **run_javascript** - Execute JavaScript/Node.js code
     Input: {{"code": "console.log('hello')"}}
-14. **create_pdf** - Create a PDF document and save to user's storage
-    Input: {{"filename": "report.pdf", "title": "My Report", "content": "Heading\n\nBody text here..."}}
-15. **create_docx** - Create a Word (DOCX) document and save to user's storage
-    Input: {{"filename": "report.docx", "title": "My Report", "content": "Heading\n\nBody text here..."}}
+14. **create_pdf** - Create a PDF document and save to user's storage. Supports subfolder paths directly (no file_move needed).
+    Input: {{"filename": "health/report.pdf", "title": "My Report", "content": "Heading\n\nBody text here..."}}
+15. **create_docx** - Create a Word (DOCX) document and save to user's storage. Supports subfolder paths directly.
+    Input: {{"filename": "health/report.docx", "title": "My Report", "content": "Heading\n\nBody text here..."}}
 16. **zip_create** - Create a ZIP archive from a file or folder
     Input: {{"source": "travel/", "output": "travel_backup.zip"}}
 16. **unzip** - Extract a ZIP archive
