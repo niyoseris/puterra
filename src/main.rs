@@ -2041,12 +2041,21 @@ async fn call_llm_chat_streaming(
     };
 
     let mut full_content = String::new();
-    let mut tool_calls_raw: Option<serde_json::Value> = None;
+    let mut accumulated_tool_calls: Vec<serde_json::Value> = Vec::new();
     let mut byte_stream = resp.bytes_stream();
     let mut buf = String::new();
     let mut streaming_started = false;
+    let chunk_timeout = std::time::Duration::from_secs(120);
 
-    while let Some(chunk) = byte_stream.next().await {
+    loop {
+        let chunk = match tokio::time::timeout(chunk_timeout, byte_stream.next()).await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break, // stream ended normally
+            Err(_) => {
+                eprintln!("[Streaming] ⏱ Timeout: no data for {}s, breaking", chunk_timeout.as_secs());
+                break;
+            }
+        };
         let bytes = match chunk { Ok(b) => b, Err(_) => break };
         buf.push_str(&String::from_utf8_lossy(&bytes));
 
@@ -2062,17 +2071,33 @@ async fn call_llm_chat_streaming(
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str) {
                 if is_openai_compat {
                     let delta = &json["choices"][0]["delta"];
-                    // Check for tool calls
-                    if let Some(tcs) = delta.get("tool_calls") {
-                        if tcs.is_array() && !tcs.as_array().unwrap().is_empty() {
-                            tool_calls_raw = Some(tcs.clone());
-                            // Not streaming content
-                            continue;
+                    // Accumulate tool calls across streaming chunks
+                    if let Some(tcs) = delta.get("tool_calls").and_then(|tc| tc.as_array()) {
+                        for tc_delta in tcs {
+                            let tc_idx = tc_delta.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                            // Expand vector to fit index
+                            while accumulated_tool_calls.len() <= tc_idx {
+                                accumulated_tool_calls.push(serde_json::json!({"function": {"name": "", "arguments": ""}}));
+                            }
+                            let entry = &mut accumulated_tool_calls[tc_idx];
+                            if let Some(id) = tc_delta.get("id").and_then(|i| i.as_str()) {
+                                entry["id"] = serde_json::json!(id);
+                            }
+                            if let Some(name) = tc_delta.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+                                if !name.is_empty() {
+                                    entry["function"]["name"] = serde_json::json!(name);
+                                }
+                            }
+                            if let Some(args) = tc_delta.get("function").and_then(|f| f.get("arguments")).and_then(|a| a.as_str()) {
+                                let existing = entry["function"]["arguments"].as_str().unwrap_or("").to_string();
+                                entry["function"]["arguments"] = serde_json::json!(format!("{}{}", existing, args));
+                            }
                         }
+                        continue;
                     }
-                    // Content chunk
+                    // Content chunk (only if no tool calls detected)
                     if let Some(tok) = delta.get("content").and_then(|c| c.as_str()) {
-                        if !tok.is_empty() && tool_calls_raw.is_none() {
+                        if !tok.is_empty() && accumulated_tool_calls.is_empty() {
                             full_content.push_str(tok);
                             if !streaming_started {
                                 streaming_started = true;
@@ -2082,20 +2107,19 @@ async fn call_llm_chat_streaming(
                         }
                     }
                 } else {
-                    // Ollama native
+                    // Ollama native — tool_calls arrive complete in one chunk
                     let done = json.get("done").and_then(|d| d.as_bool()).unwrap_or(false);
                     let msg = json.get("message");
                     if let Some(m) = msg {
-                        // Check for tool calls (Ollama sends them in one chunk)
-                        if let Some(tcs) = m.get("tool_calls") {
-                            if tcs.is_array() && !tcs.as_array().unwrap().is_empty() {
-                                tool_calls_raw = Some(tcs.clone());
+                        if let Some(tcs) = m.get("tool_calls").and_then(|tc| tc.as_array()) {
+                            if !tcs.is_empty() {
+                                accumulated_tool_calls = tcs.clone();
                                 if done { break; }
                                 continue;
                             }
                         }
                         if let Some(tok) = m.get("content").and_then(|c| c.as_str()) {
-                            if !tok.is_empty() && tool_calls_raw.is_none() {
+                            if !tok.is_empty() && accumulated_tool_calls.is_empty() {
                                 full_content.push_str(tok);
                                 if !streaming_started {
                                     streaming_started = true;
@@ -2112,12 +2136,12 @@ async fn call_llm_chat_streaming(
     }
 
     // Assemble result in the same format as call_llm_chat
-    if let Some(tcs) = tool_calls_raw {
+    if !accumulated_tool_calls.is_empty() {
         Ok(serde_json::json!({
             "message": {
                 "role": "assistant",
                 "content": "",
-                "tool_calls": tcs
+                "tool_calls": accumulated_tool_calls
             }
         }))
     } else {
@@ -2203,8 +2227,17 @@ async fn stream_llm_answer(
     let mut full_text = String::new();
     let mut byte_stream = resp.bytes_stream();
     let mut buf = String::new();
+    let chunk_timeout = std::time::Duration::from_secs(120);
 
-    while let Some(chunk) = byte_stream.next().await {
+    loop {
+        let chunk = match tokio::time::timeout(chunk_timeout, byte_stream.next()).await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break, // stream ended normally
+            Err(_) => {
+                eprintln!("[Stream] ⏱ Timeout: no data for {}s, breaking", chunk_timeout.as_secs());
+                break;
+            }
+        };
         let bytes = match chunk {
             Ok(b) => b,
             Err(_) => break,
