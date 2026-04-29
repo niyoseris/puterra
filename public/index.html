@@ -3218,7 +3218,7 @@
                                 </summary>
                                 <div class="think-body">${escapeHtml(evt.thinking)}</div>
                             </details>`;
-                            stepsArea.insertAdjacentHTML('beforeend', thinkHtml);
+                            if (stepsArea) stepsArea.insertAdjacentHTML('beforeend', thinkHtml);
                             if (statusEl) statusEl.textContent = `Thinking... (${thinkCount} thought(s), ${toolCount} tool(s))`;
                             messagesDiv.scrollTop = messagesDiv.scrollHeight;
                         }
@@ -3236,7 +3236,7 @@
                                     <span style="color:#94a3b8;font-size:0.7rem;">${escapeHtml(inputPreview)}</span>
                                 </div>
                             </div>`;
-                            stepsArea.insertAdjacentHTML('beforeend', toolHtml);
+                            if (stepsArea) stepsArea.insertAdjacentHTML('beforeend', toolHtml);
                             if (statusEl) statusEl.textContent = `Running tool: ${evt.action} (${thinkCount} thought(s), ${toolCount} tool(s))`;
                             messagesDiv.scrollTop = messagesDiv.scrollHeight;
                         }

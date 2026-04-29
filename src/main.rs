@@ -6418,6 +6418,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(app_state.clone())
             .app_data(actix_web::web::PayloadConfig::new(200 * 1024 * 1024))
+            .app_data(actix_web::web::JsonConfig::default().limit(50 * 1024 * 1024))
             .service(index)
             .service(signup)
             .service(login)
