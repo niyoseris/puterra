@@ -2881,6 +2881,7 @@
 
                 // Detect markdown table (line contains | separators)
                 if (line.includes('|') && i + 1 < lines.length && lines[i + 1].includes('|') && lines[i + 1].includes('-')) {
+                    console.log('[markdownToHtml] Table detected at line', i, ':', line.substring(0, 60));
                     const headerLine = line;
                     const separatorLine = lines[i + 1];
                     const headers = headerLine.split('|').map(h => h.trim()).filter(h => h);
@@ -3316,12 +3317,16 @@
                     }
                 }
 
-                // Show final answer — atomically replace streaming bubble if present
+                // Show final answer — replace streaming bubble with rendered markdown
                 if (finalAnswer) {
-                    const renderedHtml = `<div class="chat-message assistant">${markdownToHtml(finalAnswer)}</div>`;
+                    const rendered = markdownToHtml(finalAnswer);
+                    const renderedHtml = `<div class="chat-message assistant">${rendered}</div>`;
+                    console.log('[Puterra] finalAnswer length:', finalAnswer.length, 'rendered length:', rendered.length, 'has <table>:', rendered.includes('<table'));
                     const streamEl = document.getElementById('agent-stream-bubble');
                     if (streamEl) {
-                        streamEl.outerHTML = renderedHtml;
+                        // Use insertAdjacentHTML + remove (more reliable than outerHTML)
+                        streamEl.insertAdjacentHTML('afterend', renderedHtml);
+                        streamEl.remove();
                     } else {
                         messagesDiv.insertAdjacentHTML('beforeend', renderedHtml);
                     }
