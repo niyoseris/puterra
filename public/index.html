@@ -3266,6 +3266,7 @@
                                 streamEl.id = 'agent-stream-bubble';
                                 streamEl.className = 'chat-message assistant';
                                 streamEl.style.opacity = '0.85';
+                                streamEl.style.whiteSpace = 'pre-wrap';
                                 messagesDiv.appendChild(streamEl);
                             }
                             streamEl.textContent += evt.text || '';
@@ -3274,9 +3275,7 @@
 
                         else if (evt.type === 'answer') {
                             finalAnswer = evt.answer || '';
-                            // Remove streaming bubble — it will be replaced by properly rendered answer
-                            const streamEl = document.getElementById('agent-stream-bubble');
-                            if (streamEl) streamEl.remove();
+                            // Don't remove the bubble yet — swap it atomically after loop
                         }
 
                         else if (evt.type === 'error') {
@@ -3310,12 +3309,20 @@
                     }
                 }
 
-                // Show final answer
+                // Show final answer — atomically replace streaming bubble if present
                 if (finalAnswer) {
-                    messagesDiv.innerHTML += `<div class="chat-message assistant">${markdownToHtml(finalAnswer)}</div>`;
+                    const renderedHtml = `<div class="chat-message assistant">${markdownToHtml(finalAnswer)}</div>`;
+                    const streamEl = document.getElementById('agent-stream-bubble');
+                    if (streamEl) {
+                        streamEl.outerHTML = renderedHtml;
+                    } else {
+                        messagesDiv.innerHTML += renderedHtml;
+                    }
                     chatHistory.push({ role: 'assistant', content: finalAnswer });
                     loadFiles();
                 } else {
+                    const streamEl = document.getElementById('agent-stream-bubble');
+                    if (streamEl) streamEl.remove();
                     messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">Agent did not respond. Check Settings > LLM connection.</div>`;
                 }
             } catch (e) {
