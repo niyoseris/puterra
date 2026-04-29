@@ -1401,6 +1401,7 @@
         let conversations = []; // [{id, title, messages, html, created}]
         let activeConversationId = null;
         let agentAbortController = null;
+        let currentTaskId = null;   // task_id of the most recent agent call
         
         // Toast
         function showToast(message, type = 'info') {
@@ -2302,8 +2303,23 @@
                         <div class="chat-sidebar" id="chatSidebar">
                             <div class="chat-sidebar-header">
                                 <button onclick="newConversation()"><i class="fas fa-plus"></i> New Chat</button>
+                                <button onclick="toggleTasksPanel()" id="tasksBtn" title="Background Tasks" style="position:relative;">
+                                    <i class="fas fa-tasks"></i>
+                                    <span id="tasksActiveBadge" style="display:none;position:absolute;top:-4px;right:-4px;background:#f59e0b;color:#000;border-radius:50%;width:14px;height:14px;font-size:0.6rem;display:none;align-items:center;justify-content:center;font-weight:700;"></span>
+                                </button>
                             </div>
                             <div class="chat-sidebar-list" id="conversationList"></div>
+                            <!-- Tasks panel (slides in below header) -->
+                            <div id="tasksPanelOverlay" style="display:none;position:fixed;inset:0;z-index:900;" onclick="closeTasksPanel()"></div>
+                            <div id="tasksPanel" style="display:none;position:absolute;top:48px;left:0;right:0;bottom:0;background:#1a1a2e;border-top:1px solid rgba(99,102,241,0.3);z-index:901;overflow-y:auto;padding:12px;">
+                                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+                                    <span style="color:#a5b4fc;font-weight:600;font-size:0.85rem;"><i class="fas fa-tasks" style="margin-right:6px;"></i>Background Tasks</span>
+                                    <button onclick="closeTasksPanel()" style="background:none;border:none;color:#6b7280;cursor:pointer;padding:2px 6px;"><i class="fas fa-times"></i></button>
+                                </div>
+                                <div id="tasksListEl" style="display:flex;flex-direction:column;gap:8px;">
+                                    <div style="color:#6b7280;font-size:0.8rem;text-align:center;padding:20px;">Loading...</div>
+                                </div>
+                            </div>
                         </div>
                         <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleChatSidebar()"></div>
                         <div class="chat-main">
@@ -3282,6 +3298,20 @@
                             messagesDiv.scrollTop = messagesDiv.scrollHeight;
                         }
 
+                        else if (evt.type === 'task_started') {
+                            // Store task_id for potential reconnect
+                            if (!evt.replay) {
+                                currentTaskId = evt.task_id;
+                                const conv = conversations.find(c => c.id === activeConversationId);
+                                if (conv) {
+                                    if (!conv.taskIds) conv.taskIds = [];
+                                    if (!conv.taskIds.includes(evt.task_id)) conv.taskIds.push(evt.task_id);
+                                    saveConversations();
+                                }
+                                updateTasksBadge();
+                            }
+                        }
+
                         else if (evt.type === 'answer') {
                             finalAnswer = evt.answer || '';
                             // Don't remove the bubble yet — swap it atomically after loop
@@ -3369,6 +3399,274 @@
 
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
             saveChatHistory();
+        }
+
+        // ============================================================
+        // BACKGROUND TASK MANAGEMENT
+        // ============================================================
+
+        let tasksPanelOpen = false;
+
+        function toggleTasksPanel() {
+            tasksPanelOpen ? closeTasksPanel() : openTasksPanel();
+        }
+
+        async function openTasksPanel() {
+            tasksPanelOpen = true;
+            document.getElementById('tasksPanel').style.display = 'block';
+            document.getElementById('tasksPanelOverlay').style.display = 'block';
+            await refreshTasksList();
+        }
+
+        function closeTasksPanel() {
+            tasksPanelOpen = false;
+            document.getElementById('tasksPanel').style.display = 'none';
+            document.getElementById('tasksPanelOverlay').style.display = 'none';
+        }
+
+        async function refreshTasksList() {
+            const el = document.getElementById('tasksListEl');
+            if (!el) return;
+            try {
+                const token = localStorage.getItem('puterra_token');
+                const res = await fetch(`${API}/tasks`, {
+                    headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+                });
+                const data = await res.json();
+                const tasks = data.tasks || [];
+                updateTasksBadge(tasks);
+                if (tasks.length === 0) {
+                    el.innerHTML = '<div style="color:#6b7280;font-size:0.8rem;text-align:center;padding:20px;">No background tasks yet.</div>';
+                    return;
+                }
+                el.innerHTML = tasks.map(t => {
+                    const age = formatTaskAge(t.created_at);
+                    const statusColor = { running: '#f59e0b', completed: '#22c55e', failed: '#ef4444', cancelled: '#6b7280' }[t.status] || '#9ca3af';
+                    const statusIcon = { running: 'fa-spinner fa-spin', completed: 'fa-check-circle', failed: 'fa-exclamation-circle', cancelled: 'fa-ban' }[t.status] || 'fa-circle';
+                    const isRunning = t.status === 'running';
+                    return `<div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:10px;font-size:0.78rem;">
+                        <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:8px;">
+                            <i class="fas ${statusIcon}" style="color:${statusColor};margin-top:2px;flex-shrink:0;"></i>
+                            <div style="flex:1;min-width:0;">
+                                <div style="color:#e5e7eb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(t.message)}">${escapeHtml(t.message)}</div>
+                                <div style="color:#6b7280;font-size:0.7rem;margin-top:2px;">${age} · ${t.event_count} events · <span style="color:${statusColor}">${t.status}</span></div>
+                            </div>
+                        </div>
+                        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                            ${isRunning ? `<button onclick="reconnectTask('${t.id}')" style="background:rgba(99,102,241,0.2);border:1px solid rgba(99,102,241,0.4);color:#a5b4fc;border-radius:5px;padding:3px 8px;cursor:pointer;font-size:0.72rem;"><i class="fas fa-plug"></i> Reconnect</button>` : ''}
+                            ${!isRunning ? `<button onclick="replayTask('${t.id}')" style="background:rgba(34,197,94,0.15);border:1px solid rgba(34,197,94,0.3);color:#86efac;border-radius:5px;padding:3px 8px;cursor:pointer;font-size:0.72rem;"><i class="fas fa-play"></i> Replay</button>` : ''}
+                            ${isRunning ? `<button onclick="cancelTask('${t.id}')" style="background:rgba(249,115,22,0.15);border:1px solid rgba(249,115,22,0.3);color:#fb923c;border-radius:5px;padding:3px 8px;cursor:pointer;font-size:0.72rem;"><i class="fas fa-stop"></i> Cancel</button>` : ''}
+                            <button onclick="deleteTask('${t.id}')" style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.25);color:#f87171;border-radius:5px;padding:3px 8px;cursor:pointer;font-size:0.72rem;"><i class="fas fa-trash"></i></button>
+                        </div>
+                    </div>`;
+                }).join('');
+            } catch(e) {
+                el.innerHTML = '<div style="color:#ef4444;font-size:0.8rem;text-align:center;padding:20px;">Failed to load tasks.</div>';
+            }
+        }
+
+        function formatTaskAge(createdAt) {
+            const diff = Date.now() - createdAt;
+            if (diff < 60000) return `${Math.floor(diff/1000)}s ago`;
+            if (diff < 3600000) return `${Math.floor(diff/60000)}m ago`;
+            if (diff < 86400000) return `${Math.floor(diff/3600000)}h ago`;
+            return `${Math.floor(diff/86400000)}d ago`;
+        }
+
+        function updateTasksBadge(tasks) {
+            const badge = document.getElementById('tasksActiveBadge');
+            if (!badge) return;
+            if (!tasks) {
+                // Just hide — will be updated on next refresh
+                return;
+            }
+            const running = tasks.filter(t => t.status === 'running').length;
+            if (running > 0) {
+                badge.textContent = running;
+                badge.style.display = 'flex';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+
+        async function reconnectTask(taskId) {
+            if (agentAbortController) {
+                showToast('Another agent is already running.', 'error');
+                return;
+            }
+            closeTasksPanel();
+            const messagesDiv = document.getElementById('chatMessages');
+            if (!messagesDiv) return;
+
+            const stepsContainerId = 'agent-stream-' + Date.now();
+            messagesDiv.insertAdjacentHTML('beforeend', `<div class="agent-steps-live" id="${stepsContainerId}" style="margin-bottom:8px;">
+                <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;color:#a78bfa;font-size:0.8rem;">
+                    <i class="fas fa-brain pulse"></i>
+                    <span id="${stepsContainerId}-status">Reconnecting to background task...</span>
+                </div>
+                <div id="${stepsContainerId}-steps" class="open" style="padding:0 12px 4px;"></div>
+            </div>`);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+            agentAbortController = new AbortController();
+            setChatSendBtn('stop');
+
+            try {
+                const token = localStorage.getItem('puterra_token');
+                const res = await fetch(`${API}/tasks/${taskId}/stream`, {
+                    signal: agentAbortController.signal,
+                    headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+                });
+                await consumeAgentSSE(res, stepsContainerId);
+            } catch(e) {
+                if (e.name !== 'AbortError') {
+                    messagesDiv.insertAdjacentHTML('beforeend', `<div class="chat-message assistant" style="color:#ef4444;">Reconnect failed: ${e.message}</div>`);
+                }
+            } finally {
+                agentAbortController = null;
+                setChatSendBtn('send');
+            }
+        }
+
+        async function replayTask(taskId) {
+            await reconnectTask(taskId); // same SSE endpoint, task is complete so it just replays
+        }
+
+        async function cancelTask(taskId) {
+            const token = localStorage.getItem('puterra_token');
+            await fetch(`${API}/tasks/${taskId}`, {
+                method: 'DELETE',
+                headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+            });
+            showToast('Task cancelled.', 'success');
+            await refreshTasksList();
+        }
+
+        async function deleteTask(taskId) {
+            const token = localStorage.getItem('puterra_token');
+            await fetch(`${API}/tasks/${taskId}`, {
+                method: 'DELETE',
+                headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+            });
+            await refreshTasksList();
+        }
+
+        // Extract SSE consumption into reusable function (used by sendChat and reconnectTask)
+        async function consumeAgentSSE(res, stepsContainerId) {
+            const messagesDiv = document.getElementById('chatMessages');
+            const statusEl = document.getElementById(stepsContainerId + '-status');
+            const stepsArea = document.getElementById(stepsContainerId + '-steps');
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let finalAnswer = '';
+            let thinkCount = 0;
+            let toolCount = 0;
+            let sseComplete = false;
+
+            const toolIcons = {
+                'web_search':'fa-search','web_fetch':'fa-globe','file_read':'fa-file-alt',
+                'file_write':'fa-save','file_create':'fa-file-plus','file_list':'fa-folder-open',
+                'file_delete':'fa-trash','shell_exec':'fa-terminal','memory_store':'fa-database',
+                'memory_search':'fa-search-plus','run_python':'fa-code','run_javascript':'fa-code',
+                'create_pdf':'fa-file-pdf','image_search':'fa-image',
+            };
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    const jsonStr = line.slice(6).trim();
+                    if (!jsonStr) continue;
+                    let evt;
+                    try { evt = JSON.parse(jsonStr); } catch { continue; }
+
+                    if (evt.type === 'task_started') { /* handled in outer loop */ }
+                    else if (evt.type === 'thinking') {
+                        thinkCount++;
+                        const thinkHtml = `<details class="think-block" open><summary><i class="fas fa-caret-right think-caret"></i><i class="fas fa-brain" style="color:#a78bfa;font-size:0.75rem;"></i><span>Thought ${thinkCount}</span></summary><div class="think-body">${escapeHtml(evt.thinking)}</div></details>`;
+                        if (stepsArea) stepsArea.insertAdjacentHTML('beforeend', thinkHtml);
+                        if (statusEl) statusEl.textContent = `Thinking... (${thinkCount} thought(s), ${toolCount} tool(s))`;
+                        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                    } else if (evt.type === 'tool_call') {
+                        toolCount++;
+                        const icon = toolIcons[evt.action] || 'fa-cog';
+                        const toolId = stepsContainerId + '-tool-' + toolCount;
+                        const inputPreview = (evt.action_input || '').substring(0, 100);
+                        const toolHtml = `<div class="agent-step" id="${toolId}" style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);"><div class="agent-step-action" style="display:flex;align-items:center;gap:6px;color:#fbbf24;font-family:'JetBrains Mono',monospace;font-size:0.75rem;"><i class="fas fa-spinner fa-spin" id="${toolId}-spinner" style="font-size:0.65rem;color:#94a3b8;"></i><i class="fas ${icon}"></i><strong>${escapeHtml(evt.action)}</strong><span style="color:#94a3b8;font-size:0.7rem;">${escapeHtml(inputPreview)}</span></div></div>`;
+                        if (stepsArea) stepsArea.insertAdjacentHTML('beforeend', toolHtml);
+                        if (statusEl) statusEl.textContent = `Running tool: ${evt.action} (${thinkCount} thought(s), ${toolCount} tool(s))`;
+                        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                    } else if (evt.type === 'tool_result') {
+                        const toolEl = stepsArea ? stepsArea.querySelector(`#${stepsContainerId}-tool-${toolCount}`) : null;
+                        if (toolEl) {
+                            const spinner = toolEl.querySelector('.fa-spinner');
+                            if (spinner) { spinner.className = 'fas fa-check'; spinner.style.color = '#86efac'; }
+                            const obsId = stepsContainerId + '-obs-' + toolCount;
+                            const obsPreview = (evt.observation || '').length > 80 ? evt.observation.substring(0, 80) + '...' : (evt.observation || '');
+                            toolEl.insertAdjacentHTML('beforeend', `<div class="agent-step-obs-toggle" onclick="toggleSteps('${obsId}')" style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 0 2px 20px;"><i class="fas fa-caret-right" id="${obsId}-icon" style="font-size:0.6rem;width:10px;color:#6b7280;"></i><span style="color:#6b7280;font-size:0.7rem;">${escapeHtml(obsPreview)}</span></div><div class="agent-steps-body" id="${obsId}" style="display:none;margin-left:20px;"><div class="agent-step-observation" style="color:#86efac;font-size:0.75rem;max-height:100px;overflow-y:auto;padding:6px;background:rgba(0,0,0,0.2);border-radius:4px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(evt.observation || '')}</div></div>`);
+                        }
+                        if (statusEl) statusEl.textContent = `Continuing... (${thinkCount} thought(s), ${toolCount} tool(s))`;
+                    } else if (evt.type === 'status') {
+                        if (statusEl) statusEl.textContent = evt.message;
+                    } else if (evt.type === 'answer_chunk') {
+                        let streamEl = document.getElementById('agent-stream-bubble');
+                        if (!streamEl) {
+                            streamEl = document.createElement('div');
+                            streamEl.id = 'agent-stream-bubble';
+                            streamEl.className = 'chat-message assistant';
+                            streamEl.style.opacity = '0.85';
+                            streamEl.style.whiteSpace = 'pre-wrap';
+                            messagesDiv.appendChild(streamEl);
+                        }
+                        streamEl.textContent += evt.text || '';
+                        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                    } else if (evt.type === 'answer') {
+                        finalAnswer = evt.answer || '';
+                    } else if (evt.type === 'error') {
+                        if (statusEl) { statusEl.textContent = evt.error; statusEl.style.color = '#ef4444'; }
+                    } else if (evt.type === 'done') {
+                        sseComplete = true;
+                        const container = document.getElementById(stepsContainerId);
+                        if (container && (thinkCount > 0 || toolCount > 0)) {
+                            const summary = [];
+                            if (thinkCount > 0) summary.push(`${thinkCount} thought(s)`);
+                            if (toolCount > 0) summary.push(`${toolCount} tool(s)`);
+                            const stepsBodyId = stepsContainerId + '-steps';
+                            const headerEl = container.querySelector(':scope > div:first-child');
+                            if (headerEl) {
+                                headerEl.outerHTML = `<div class="agent-steps-header" onclick="toggleSteps('${stepsBodyId}')" style="padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:8px;color:#a5b4fc;font-weight:500;"><i class="fas fa-caret-down" id="${stepsBodyId}-icon"></i><i class="fas fa-brain" style="color:#a78bfa;"></i><span style="color:#c4b5fd;font-size:0.85rem;">Agent: ${summary.join(', ')}</span></div>`;
+                            }
+                            container.style.border = '1px solid rgba(167,139,250,0.3)';
+                            container.style.background = 'rgba(167,139,250,0.06)';
+                            container.style.borderRadius = '8px';
+                        } else if (container) {
+                            container.remove();
+                        }
+                    }
+                }
+                if (sseComplete) break;
+            }
+
+            if (finalAnswer) {
+                const rendered = markdownToHtml(finalAnswer);
+                const renderedHtml = `<div class="chat-message assistant">${rendered}</div>`;
+                const streamEl = document.getElementById('agent-stream-bubble');
+                if (streamEl) { streamEl.insertAdjacentHTML('afterend', renderedHtml); streamEl.remove(); }
+                else { messagesDiv.insertAdjacentHTML('beforeend', renderedHtml); }
+                chatHistory.push({ role: 'assistant', content: finalAnswer });
+                loadFiles();
+            } else {
+                const streamEl = document.getElementById('agent-stream-bubble');
+                if (streamEl) streamEl.remove();
+            }
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
         }
 
         // Apply font preferences based on viewport size

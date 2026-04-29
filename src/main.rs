@@ -3,7 +3,7 @@ use actix_files as fs;
 use actix_multipart::Multipart;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, broadcast};
 use tokio_stream;
 use std::sync::Mutex;
 use std::collections::HashMap;
@@ -274,6 +274,53 @@ struct AppState {
     browser_clients: Mutex<HashMap<String, reqwest::Client>>, // username -> cookie-jar client
     browser_state: Mutex<HashMap<String, BrowserState>>,     // username -> current browser page
     browser_results: Mutex<HashMap<String, serde_json::Value>>, // cmd_id -> result from frontend
+    background_tasks: Mutex<HashMap<String, std::sync::Arc<BackgroundTask>>>,
+}
+
+// ============================================================
+// BACKGROUND TASK TYPES
+// ============================================================
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum TaskStatus { Running, Completed, Failed, Cancelled }
+
+struct BackgroundTask {
+    id: String,
+    conv_id: String,
+    username: String,
+    message: String,
+    status: Mutex<TaskStatus>,
+    created_at: u64,
+    events: Mutex<Vec<String>>,
+    broadcast_tx: broadcast::Sender<Option<String>>,
+    join_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl BackgroundTask {
+    fn new(id: String, conv_id: String, username: String, message: String) -> Self {
+        let (broadcast_tx, _) = broadcast::channel(2048);
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        BackgroundTask {
+            id, conv_id, username, message,
+            status: Mutex::new(TaskStatus::Running),
+            created_at,
+            events: Mutex::new(Vec::new()),
+            broadcast_tx,
+            join_handle: Mutex::new(None),
+        }
+    }
+}
+
+fn generate_task_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{:x}", nanos)
 }
 
 #[derive(Serialize)]
@@ -4763,23 +4810,40 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
         Some(cloned)
     });
 
-    let (tx, rx) = mpsc::channel::<String>(64);
+    // Create background task for persistent execution
+    let task_id = generate_task_id();
+    let task = std::sync::Arc::new(BackgroundTask::new(
+        task_id.clone(), conv_id.clone(), username.clone(),
+        message.chars().take(200).collect(),
+    ));
+
+    // Subscribe to broadcast BEFORE spawning agent (no missed events)
+    let broadcast_rx = task.broadcast_tx.subscribe();
+
+    // Internal channel: agent → forwarder
+    let (tx, mut forwarder_rx) = mpsc::channel::<String>(128);
     let state = app_data.clone();
 
-    // Spawn heartbeat task — sends SSE comment every 20s to keep the connection alive
-    // through proxies/browsers that close idle SSE streams.
-    let heartbeat_tx = tx.clone();
+    // Forwarder: reads from agent mpsc → buffers + broadcasts
+    let task_for_fwd = task.clone();
     tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
-            if heartbeat_tx.send(sse_ping()).await.is_err() {
-                break; // Main task finished and channel dropped
+        while let Some(event) = forwarder_rx.recv().await {
+            if event.contains("\"type\":\"done\"") {
+                *task_for_fwd.status.lock().unwrap() = TaskStatus::Completed;
             }
+            task_for_fwd.events.lock().unwrap().push(event.clone());
+            let _ = task_for_fwd.broadcast_tx.send(Some(event));
         }
+        // Agent task finished — mark failed if not completed/cancelled
+        {
+            let mut st = task_for_fwd.status.lock().unwrap();
+            if *st == TaskStatus::Running { *st = TaskStatus::Failed; }
+        }
+        let _ = task_for_fwd.broadcast_tx.send(None); // signal end-of-stream
     });
 
     // Spawn the agent loop in a background task
-    tokio::spawn(async move {
+    let agent_handle = tokio::spawn(async move {
         let model_ref = model.as_deref();
         let prefs = load_user_preferences(&username);
         let system_prompt = if !prefs.system_prompt_override.is_empty() {
@@ -5016,15 +5080,178 @@ async fn agent_chat(app_data: web::Data<AppState>, body: web::Json<AgentRequest>
         let _ = tx.send(sse_event(&serde_json::json!({"type": "done"}))).await;
     });
 
-    // Create SSE streaming response from channel
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    // Store agent handle for cancellation
+    *task.join_handle.lock().unwrap() = Some(agent_handle);
+
+    // Store task in AppState
+    {
+        let mut tasks = app_data.background_tasks.lock().unwrap();
+        // Keep only last 100 tasks per user to avoid memory growth
+        let uname = task.username.clone();
+        let user_task_count = tasks.values().filter(|t| t.username == uname).count();
+        if user_task_count >= 100 {
+            let oldest_key = tasks.iter()
+                .filter(|(_, t)| t.username == uname && *t.status.lock().unwrap() != TaskStatus::Running)
+                .min_by_key(|(_, t)| t.created_at)
+                .map(|(k, _)| k.clone());
+            if let Some(k) = oldest_key { tasks.remove(&k); }
+        }
+        tasks.insert(task_id.clone(), task.clone());
+    }
+
+    // SSE response: task_started event + forward broadcast to client
+    let (sse_tx, sse_rx) = mpsc::channel::<String>(128);
+    let task_id_clone = task_id.clone();
+    tokio::spawn(async move {
+        let _ = sse_tx.send(sse_event(&serde_json::json!({"type":"task_started","task_id":task_id_clone}))).await;
+        stream_broadcast_to_sse(broadcast_rx, sse_tx).await;
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(sse_rx);
     let body_stream = stream.map(|s| Ok::<_, actix_web::Error>(actix_web::web::Bytes::from(s)));
 
     HttpResponse::Ok()
         .content_type("text/event-stream")
         .insert_header(("Cache-Control", "no-cache"))
         .insert_header(("X-Accel-Buffering", "no"))
+        .insert_header(("X-Task-Id", task_id))
         .streaming(body_stream)
+}
+
+/// Forward broadcast events to an SSE mpsc channel, with heartbeat.
+/// Returns when broadcast closes (task done) OR sse_tx is dropped (browser disconnected).
+/// Task continues running even if browser disconnects.
+async fn stream_broadcast_to_sse(
+    mut broadcast_rx: broadcast::Receiver<Option<String>>,
+    sse_tx: mpsc::Sender<String>,
+) {
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(20));
+    heartbeat.tick().await; // skip immediate first tick
+    loop {
+        tokio::select! {
+            msg = broadcast_rx.recv() => {
+                match msg {
+                    Ok(Some(event)) => {
+                        if sse_tx.send(event).await.is_err() { return; } // browser disconnected
+                    }
+                    Ok(None) | Err(_) => return, // task done or broadcast closed
+                }
+            }
+            _ = heartbeat.tick() => {
+                if sse_tx.send(sse_ping()).await.is_err() { return; }
+            }
+        }
+    }
+}
+
+// ============================================================
+// BACKGROUND TASK MANAGEMENT
+// ============================================================
+
+#[get("/api/tasks")]
+async fn list_tasks(app_data: web::Data<AppState>, req: HttpRequest) -> HttpResponse {
+    let username = extract_username_from_request(&req, &app_data);
+    let tasks = app_data.background_tasks.lock().unwrap();
+    let mut user_tasks: Vec<serde_json::Value> = tasks.values()
+        .filter(|t| t.username == username)
+        .map(|t| {
+            let status = t.status.lock().unwrap().clone();
+            let event_count = t.events.lock().unwrap().len();
+            serde_json::json!({
+                "id": t.id,
+                "conv_id": t.conv_id,
+                "message": t.message,
+                "status": status,
+                "created_at": t.created_at,
+                "event_count": event_count,
+            })
+        })
+        .collect();
+    user_tasks.sort_by(|a, b| {
+        b["created_at"].as_u64().unwrap_or(0).cmp(&a["created_at"].as_u64().unwrap_or(0))
+    });
+    HttpResponse::Ok().json(serde_json::json!({"success": true, "tasks": user_tasks}))
+}
+
+#[get("/api/tasks/{id}/stream")]
+async fn task_stream(app_data: web::Data<AppState>, path: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    let task_id = path.into_inner();
+    let username = extract_username_from_request(&req, &app_data);
+    let task = {
+        let tasks = app_data.background_tasks.lock().unwrap();
+        match tasks.get(&task_id) {
+            Some(t) if t.username == username => t.clone(),
+            _ => return HttpResponse::NotFound().json(serde_json::json!({"error":"task not found"})),
+        }
+    };
+
+    // Subscribe BEFORE snapshotting buffer (no gap, no duplicate logic)
+    let broadcast_rx = task.broadcast_tx.subscribe();
+    let buffered: Vec<String> = task.events.lock().unwrap().clone();
+    let is_done = *task.status.lock().unwrap() != TaskStatus::Running;
+
+    let (sse_tx, sse_rx) = mpsc::channel::<String>(256);
+    tokio::spawn(async move {
+        // Send task_started header event so frontend sets up its state
+        let _ = sse_tx.send(sse_event(&serde_json::json!({"type":"task_started","task_id":task_id,"replay":true}))).await;
+        // Replay buffered events
+        for event in buffered {
+            if sse_tx.send(event).await.is_err() { return; }
+        }
+        if is_done { return; }
+        // Stream new events from broadcast
+        stream_broadcast_to_sse(broadcast_rx, sse_tx).await;
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(sse_rx);
+    let body_stream = stream.map(|s| Ok::<_, actix_web::Error>(actix_web::web::Bytes::from(s)));
+    HttpResponse::Ok()
+        .content_type("text/event-stream")
+        .insert_header(("Cache-Control", "no-cache"))
+        .insert_header(("X-Accel-Buffering", "no"))
+        .streaming(body_stream)
+}
+
+#[delete("/api/tasks/{id}")]
+async fn delete_task(app_data: web::Data<AppState>, path: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    let task_id = path.into_inner();
+    let username = extract_username_from_request(&req, &app_data);
+    let mut tasks = app_data.background_tasks.lock().unwrap();
+    match tasks.get(&task_id) {
+        Some(t) if t.username == username => {
+            // Abort running agent task
+            if let Some(handle) = t.join_handle.lock().unwrap().take() {
+                handle.abort();
+            }
+            *t.status.lock().unwrap() = TaskStatus::Cancelled;
+            let _ = t.broadcast_tx.send(None); // signal stream end
+            tasks.remove(&task_id);
+            HttpResponse::Ok().json(serde_json::json!({"success": true}))
+        }
+        _ => HttpResponse::NotFound().json(serde_json::json!({"error":"task not found"})),
+    }
+}
+
+/// Extract username from Authorization header token or query param
+fn extract_username_from_request(req: &HttpRequest, app_data: &web::Data<AppState>) -> String {
+    let token = req.headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+        .or_else(|| {
+            req.query_string().split('&')
+                .find(|p| p.starts_with("token="))
+                .and_then(|p| p.strip_prefix("token="))
+                .map(|s| s.to_string())
+        });
+    if let Some(tok) = token {
+        let sessions = app_data.sessions.lock().unwrap();
+        if let Some(sess) = sessions.get(&tok) {
+            return sess.username.clone();
+        }
+    }
+    "guest".to_string()
 }
 
 // ============================================================
@@ -6378,6 +6605,7 @@ async fn main() -> std::io::Result<()> {
         browser_clients: Mutex::new(HashMap::new()),
         browser_state: Mutex::new(HashMap::new()),
         browser_results: Mutex::new(HashMap::new()),
+        background_tasks: Mutex::new(HashMap::new()),
     });
 
     // Load persisted users, then ensure admin is up-to-date
@@ -6433,6 +6661,9 @@ async fn main() -> std::io::Result<()> {
             .service(memory)
             .service(chat)
             .service(agent_chat)
+            .service(list_tasks)
+            .service(task_stream)
+            .service(delete_task)
             .service(run_code)
             .service(list_custom_tools)
             .service(save_custom_tool)
