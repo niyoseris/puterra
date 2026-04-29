@@ -3183,6 +3183,7 @@
                 let statusEl = document.getElementById(stepsContainerId + '-status');
                 let thinkCount = 0;
                 let toolCount = 0;
+                let sseComplete = false;
 
                 const toolIcons = {
                     'web_search': 'fa-search', 'web_fetch': 'fa-globe', 'file_read': 'fa-file-alt',
@@ -3292,6 +3293,7 @@
                         }
 
                         else if (evt.type === 'done') {
+                            sseComplete = true;
                             // Update container header to final state
                             const container = document.getElementById(stepsContainerId);
                             if (container && (thinkCount > 0 || toolCount > 0)) {
@@ -3315,6 +3317,7 @@
                             }
                         }
                     }
+                    if (sseComplete) break;
                 }
 
                 // Show final answer — replace streaming bubble with rendered markdown
