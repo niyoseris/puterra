@@ -2894,11 +2894,18 @@
                         j++;
                     }
 
+                    // Helper to process inline markdown (defined here for table scope)
+                    const processInlineTable = (text) => text
+                        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                        .replace(/__(.*?)__/g, '<strong>$1</strong>')
+                        .replace(/\*(.*?)\*/g, '<em>$1</em>')
+                        .replace(/_(.*?)_/g, '<em>$1</em>');
+
                     // Build HTML table
                     let tableHtml = '<table style="border-collapse:collapse;width:100%;margin:12px 0;border:1px solid rgba(255,255,255,0.2);">';
                     tableHtml += '<thead><tr style="background:rgba(99,102,241,0.15);">';
                     for (const h of headers) {
-                        tableHtml += `<th style="border:1px solid rgba(255,255,255,0.15);padding:10px;text-align:left;font-weight:600;color:#a5b4fc;">${h}</th>`;
+                        tableHtml += `<th style="border:1px solid rgba(255,255,255,0.15);padding:10px;text-align:left;font-weight:600;color:#a5b4fc;">${processInlineTable(h)}</th>`;
                     }
                     tableHtml += '</tr></thead><tbody>';
 
@@ -2906,7 +2913,7 @@
                         tableHtml += '<tr style="border:1px solid rgba(255,255,255,0.15);">';
                         for (let k = 0; k < headers.length; k++) {
                             const cell = row[k] || '';
-                            tableHtml += `<td style="border:1px solid rgba(255,255,255,0.15);padding:10px;color:#e5e7eb;">${cell}</td>`;
+                            tableHtml += `<td style="border:1px solid rgba(255,255,255,0.15);padding:10px;color:#e5e7eb;">${processInlineTable(cell)}</td>`;
                         }
                         tableHtml += '</tr>';
                     }
@@ -3130,7 +3137,7 @@
             }
 
             const messagesDiv = document.getElementById('chatMessages');
-            messagesDiv.innerHTML += `<div class="chat-message user">${escapeHtml(message)}</div>`;
+            messagesDiv.insertAdjacentHTML('beforeend', `<div class="chat-message user">${escapeHtml(message)}</div>`);
 
             // Add to active conversation's history
             chatHistory.push({ role: 'user', content: message });
@@ -3141,13 +3148,13 @@
 
             // Create streaming agent steps container
             const stepsContainerId = 'agent-stream-' + Date.now();
-            messagesDiv.innerHTML += `<div class="agent-steps-live" id="${stepsContainerId}" style="margin-bottom:8px;">
+            messagesDiv.insertAdjacentHTML('beforeend', `<div class="agent-steps-live" id="${stepsContainerId}" style="margin-bottom:8px;">
                 <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;color:#a78bfa;font-size:0.8rem;">
                     <i class="fas fa-brain pulse"></i>
                     <span id="${stepsContainerId}-status">Agent thinking...</span>
                 </div>
                 <div id="${stepsContainerId}-steps" class="open" style="padding:0 12px 4px;"></div>
-            </div>`;
+            </div>`);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
 
             agentAbortController = new AbortController();
@@ -3316,14 +3323,14 @@
                     if (streamEl) {
                         streamEl.outerHTML = renderedHtml;
                     } else {
-                        messagesDiv.innerHTML += renderedHtml;
+                        messagesDiv.insertAdjacentHTML('beforeend', renderedHtml);
                     }
                     chatHistory.push({ role: 'assistant', content: finalAnswer });
                     loadFiles();
                 } else {
                     const streamEl = document.getElementById('agent-stream-bubble');
                     if (streamEl) streamEl.remove();
-                    messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">Agent did not respond. Check Settings > LLM connection.</div>`;
+                    messagesDiv.insertAdjacentHTML('beforeend', `<div class="chat-message assistant" style="color:#ef4444;">Agent did not respond. Check Settings > LLM connection.</div>`);
                 }
             } catch (e) {
                 const container = document.getElementById(stepsContainerId);
@@ -3345,7 +3352,7 @@
                     }
                 } else {
                     if (container) container.remove();
-                    messagesDiv.innerHTML += `<div class="chat-message assistant" style="color:#ef4444;">Connection error: ${e.message}</div>`;
+                    messagesDiv.insertAdjacentHTML('beforeend', `<div class="chat-message assistant" style="color:#ef4444;">Connection error: ${e.message}</div>`);
                 }
             } finally {
                 agentAbortController = null;
