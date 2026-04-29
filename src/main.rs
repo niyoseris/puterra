@@ -3090,29 +3090,26 @@ Tool Reuse Strategy:
 - Tools should be GENERAL PURPOSE and REUSABLE, not single-use scripts. Example: write a general "web_scraper" tool with URL+selector params, not a "scrape_kktc_cinemas" tool.
 - When an existing tool almost fits, read it with file_read and improve it rather than creating a new one.
 
-## Task Persistence (REQUIRED for multi-step tasks)
-
-For ANY task with 3+ steps, or that involves research, writing, data collection, or file creation:
+## Task Persistence (EVERY message — mandatory context check)
 
 **ONE FOLDER PER CONVERSATION — strict rule:**
 - This conversation ID is: `{}`
 - Your task folder is: `tasks/{}/` (FIXED — never create a different folder for this conversation)
 - NEVER create `tasks/{}-something-else/` or any other variation. One folder, one conversation.
 
-**FIRST — check if the folder exists:**
-Run `file_list` and look for `tasks/{}/`.
-- **Exists** → read `plan.md` and `progress.md` immediately. The new message is a CONTINUATION or UPDATE — update `plan.md` with the new goal, keep ✅ done steps, add new steps, continue.
-- **Doesn't exist** → create `tasks/{}/` and start fresh.
+**START OF EVERY MESSAGE — always check first:**
+Run `file_list` on `tasks/{}/` before doing anything else.
+- **Folder exists** → Read `plan.md` and `progress.md` IMMEDIATELY. Treat the new message as a CONTINUATION — build on prior work, never repeat completed steps, use `findings.md` to avoid re-researching.
+- **Folder doesn't exist** → Check if this task needs 2+ steps OR involves research, writing, data collection, or file creation. If yes, create the folder and start. If it's a simple one-step reply, skip the folder.
 
-**At the START (folder doesn't exist yet):**
+**Creating the folder (first time):**
 1. `file_create(name="tasks/{}/", kind="folder")`
 2. Write `tasks/{}/plan.md`: Goal, numbered Steps, Status: 🔄 In Progress
 
-**When the user UPDATES the task (folder already exists):**
-1. Read existing `plan.md` and `progress.md`
-2. Update `plan.md` with the new goal (keep ✅ completed steps, add new ones)
-3. Use `findings.md` to avoid repeating research — NEVER redo completed work
-4. Continue from the first incomplete step
+**Continuing (folder already exists):**
+1. Read `plan.md` and `progress.md` → understand current state
+2. Update `plan.md`: keep ✅ completed steps, add new steps from the new message
+3. Use `findings.md` → NEVER redo completed research
 
 **After EACH completed step:**
 - Update `tasks/{}/progress.md`: ✅ done / 🔄 current / ⏳ remaining
@@ -3130,14 +3127,13 @@ Run `file_list` and look for `tasks/{}/`.
         conv_id,   // {3}  "This conversation ID is: `{}`"
         conv_id,   // {4}  "tasks/{}/" fixed folder
         conv_id,   // {5}  "tasks/{}-something-else/"
-        conv_id,   // {6}  "look for tasks/{}/"
-        conv_id,   // {7}  "Doesn't exist → create tasks/{}/"
-        conv_id,   // {8}  file_create "tasks/{}/"
-        conv_id,   // {9}  "tasks/{}/plan.md"
-        conv_id,   // {10} "tasks/{}/progress.md"
-        conv_id,   // {11} "tasks/{}/findings.md"
-        conv_id,   // {12} "tasks/{}/" save files
-        conv_id,   // {13} "tasks/{}/progress.md" error section
+        conv_id,   // {6}  "file_list on tasks/{}/"
+        conv_id,   // {7}  file_create "tasks/{}/"
+        conv_id,   // {8}  "tasks/{}/plan.md"
+        conv_id,   // {9}  "tasks/{}/progress.md"
+        conv_id,   // {10} "tasks/{}/findings.md"
+        conv_id,   // {11} "tasks/{}/" save files
+        conv_id,   // {12} "tasks/{}/progress.md" error section
     )
 }
 
@@ -4501,17 +4497,15 @@ Final Answer: [your complete answer with markdown formatting]
 - To create Word (DOCX) files, ALWAYS use the create_docx tool.
 - After receiving an Observation, you MUST either use another tool OR give a Final Answer
 
-## Task Persistence (REQUIRED for multi-step tasks)
-
-For ANY task with 3+ steps (research, writing, data collection, file creation):
+## Task Persistence (EVERY message — mandatory context check)
 
 **ONE FOLDER PER CONVERSATION — strict rule:**
 - This conversation ID is: `{}`
 - Your task folder is: `tasks/{}/` — FIXED. Never create any other folder for this conversation.
 
-**FIRST — check if folder exists:** Look for `tasks/{}/` in file_list.
-- **Found** → read plan.md & progress.md immediately. The new message is a CONTINUATION or UPDATE — update plan.md (keep ✅ steps), use findings.md, continue.
-- **Not found** → create `tasks/{}/` and write plan.md.
+**START OF EVERY MESSAGE — check first:** Look for `tasks/{}/` in file_list.
+- **Found** → read plan.md & progress.md immediately. The new message is a CONTINUATION — build on prior work, keep ✅ steps, use findings.md, NEVER redo completed research.
+- **Not found** → if task needs 2+ steps or involves research/writing/file creation, create `tasks/{}/` and write plan.md. Otherwise proceed without folder.
 
 **When user UPDATES the task:** Read plan.md/progress.md → update goal → keep ✅ steps → use findings.md → NEVER redo completed research.
 
